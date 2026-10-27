@@ -14,8 +14,6 @@ Section {
   property var strings: null
   property var device: null
   property var present: []
-  // Alt+N numbering goes on from the registered keys above.
-  property int indexOffset: 0
   // The remove button waiting for confirmation (Model.removeId), or "".
   property string pending: ""
   property bool busy: false
@@ -58,7 +56,6 @@ Section {
       required property var modelData
       required property int index
       readonly property alias removeButton: removeButton
-      readonly property int number: ssh.indexOffset + index
       readonly property bool asking: ssh.pending === Model.removeId("ssh", modelData)
       readonly property string removeLabel: asking ? ssh.t("securityKey.fido.confirmRemove") : ssh.t("securityKey.fido.remove")
       width: parent ? parent.width : 0
@@ -86,7 +83,7 @@ Section {
         bordered: true
         enabled: !ssh.busy
         iconText: "󰩺"
-        text: number < 9 ? Model.shortcut(removeLabel, "Alt+" + (number + 1)) : removeLabel
+        text: index < 9 ? Model.shortcut(removeLabel, "Alt+" + (index + 1)) : removeLabel
         selected: asking
         foreground: asking ? ssh.urgent : ssh.foreground
         accent: ssh.accent

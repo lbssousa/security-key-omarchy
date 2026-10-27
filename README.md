@@ -6,9 +6,10 @@ behind *Setup › Security › FIDO2*. Modelled on the security-key page of
 [lbssousa/noctalia](https://github.com/lbssousa/noctalia/tree/feat/security-hardware)
 and themed like the shell's polkit agent.
 
-![The overlay with a YubiKey: sign-in key, OpenPGP card and resident SSH keys](preview.png)
+![The overlay with a YubiKey, one tab after another: sign-in key, OpenPGP card and resident SSH keys](preview.png)
 
-Three sections, each shown only when the key plugged in can do it:
+Three sections, each in its own tab (*FIDO2*, *OpenPGP*, *SSH*) and shown
+only when the key plugged in can do it:
 
 - **Sign in with the key** (FIDO2/U2F): registers the key for sudo and
   polkit with `pamu2fcfg`, asking for its PIN when it has one, and lists the
@@ -36,9 +37,11 @@ open.
 | Key | Does |
 |-----|------|
 | Tab / Shift+Tab | Move between the buttons |
+| Ctrl+Tab / Ctrl+Shift+Tab, Ctrl+Page Down / Ctrl+Page Up | Next / previous tab |
+| Left / Right, then Enter (on the tab bar) | Pick a tab |
 | Enter / Space | Activate the button; in the PIN dialog, run the action |
 | Alt+R | Register the key (sudo and polkit) |
-| Alt+1 … Alt+9 | Remove that item, counting the registered keys, then the SSH keys in `~/.ssh` (again, or Enter, confirms) |
+| Alt+1 … Alt+9 | Remove that item of the tab shown: a registered key, or an SSH key in `~/.ssh` (again, or Enter, confirms) |
 | Alt+I | Import the OpenPGP public key / link it to the card |
 | Alt+T | Trust the OpenPGP key ultimately |
 | Alt+D | Remove the OpenPGP key from the keyring (again, or Enter, confirms) |
@@ -47,7 +50,8 @@ open.
 | Up / Down, Page Up / Page Down, Home / End | Scroll the card, when it is taller than the screen |
 | Escape | Cancel what runs (a registration waiting for a touch), or close the PIN dialog or the overlay |
 
-Each button shows its key. When the key has a PIN, registering and
+Each button shows its key, and the Alt keys of the other tabs work too,
+switching to their tab. When the key has a PIN, registering and
 importing the SSH keys ask for it in a dialog over the card, which then
 waits for the touch; a wrong PIN keeps it open to try again.
 

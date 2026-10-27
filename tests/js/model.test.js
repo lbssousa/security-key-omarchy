@@ -51,15 +51,39 @@ test("latin runs isolated for right-to-left text", () => {
   assert.deepEqual(["id_ed25519_sk_rk"].map(Model.ltr), ["⁦id_ed25519_sk_rk⁩"])
 })
 
-test("Alt+N counts the registered keys, then the SSH keys", () => {
+test("Alt+N counts the removable items of the tab shown", () => {
   const creds = [{ label: "a" }, { label: "b" }]
   const ssh = ["id_ed25519_sk_rk", "id_ed25519_sk_rk_github.com"]
-  assert.deepEqual(Model.removable(creds, ssh, 1), { kind: "fido", index: 1 })
-  assert.deepEqual(Model.removable(creds, ssh, 3), { kind: "ssh", index: 1, name: "id_ed25519_sk_rk_github.com" })
-  assert.equal(Model.removable(creds, ssh, 4), null)
-  assert.deepEqual(Model.removable([], ssh, 0), { kind: "ssh", index: 0, name: "id_ed25519_sk_rk" })
+  assert.deepEqual(Model.removable("fido", creds, ssh, 1), { kind: "fido", index: 1 })
+  assert.equal(Model.removable("fido", creds, ssh, 2), null)
+  assert.deepEqual(Model.removable("ssh", creds, ssh, 1), { kind: "ssh", index: 1, name: "id_ed25519_sk_rk_github.com" })
+  assert.equal(Model.removable("ssh", creds, ssh, 2), null)
+  assert.equal(Model.removable("gpg", creds, ssh, 0), null)
+  assert.equal(Model.removable("fido", creds, ssh, -1), null)
   assert.equal(Model.removeId("ssh", "id_x"), "ssh:id_x")
   assert.equal(Model.removeId("gpg"), "gpg")
   assert.equal(Model.errorKey("secret-on-disk"), "securityKey.gpg.secretOnDisk")
   assert.equal(Model.errorKey("not-authorized"), "securityKey.error.writeFailed")
+})
+
+test("one tab per section the key can do", () => {
+  const card = { serial: "1" }
+  assert.deepEqual(Model.tabs([yubikey], [], card, []), ["fido", "gpg", "ssh"])
+  assert.deepEqual(Model.tabs([{ path: "/dev/hidraw2", rk: false }], [], null, []), ["fido"])
+  assert.deepEqual(Model.tabs([], [{ label: "a" }], null, ["id_ed25519_sk_rk"]), ["fido", "ssh"])
+  assert.deepEqual(Model.tabs([], [], card, []), ["gpg"])
+  assert.deepEqual(Model.tabs([], [], null, []), [])
+})
+
+test("the tab shown, and Ctrl+Tab round the tabs", () => {
+  const all = ["fido", "gpg", "ssh"]
+  assert.equal(Model.currentTab(all, "ssh"), "ssh")
+  assert.equal(Model.currentTab(["fido", "gpg"], "ssh"), "fido")
+  assert.equal(Model.currentTab(all, ""), "fido")
+  assert.equal(Model.currentTab([], "fido"), "")
+  assert.equal(Model.nextTab(all, "gpg", 1), "ssh")
+  assert.equal(Model.nextTab(all, "ssh", 1), "fido")
+  assert.equal(Model.nextTab(all, "fido", -1), "ssh")
+  assert.equal(Model.nextTab(["gpg"], "gpg", 1), "gpg")
+  assert.equal(Model.nextTab([], "fido", 1), "")
 })

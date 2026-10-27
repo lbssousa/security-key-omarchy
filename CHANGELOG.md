@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- The three sections are tabs now (*FIDO2*, *OpenPGP*, *SSH*), one shown at
+  a time, with the card keeping the height of the tallest. Ctrl+Tab and
+  Ctrl+Shift+Tab (or Ctrl+Page Down/Up) switch tabs; an action's Alt key
+  opens its tab, and a tab left while its action runs shows "…".
+- Alt+1-9 count the items of the tab shown, so SSH keys start at Alt+1.
+- The card no longer opens scrolled down when the key is reported before
+  the overlay's window has its size.
+
 ## 0.2.0 (2026-10-27)
 
 - When sudo and polkit read a shared authfile that

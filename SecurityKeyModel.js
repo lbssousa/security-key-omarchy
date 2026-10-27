@@ -74,16 +74,40 @@ function errorKey(code) {
   return ERROR_KEYS[code] || "securityKey.error.generic"
 }
 
-// Alt+1-9 count the removable items down the card: the registered keys,
-// then the SSH keys in ~/.ssh. Item n (from 0) is { kind: "fido", index }
-// or { kind: "ssh", index, name }, or null past the end.
-function removable(credentials, sshKeys, n) {
-  var fido = credentials ? credentials.length : 0
+// Alt+1-9 count the removable items of the tab shown: the registered keys
+// on "fido", the SSH keys in ~/.ssh on "ssh". Item n (from 0) is
+// { kind: "fido", index } or { kind: "ssh", index, name }, or null past the
+// end.
+function removable(tab, credentials, sshKeys, n) {
   if (n < 0) return null
-  if (n < fido) return { kind: "fido", index: n }
-  var ssh = sshKeys || []
-  if (n - fido < ssh.length) return { kind: "ssh", index: n - fido, name: ssh[n - fido] }
+  if (tab === "fido" && credentials && n < credentials.length) return { kind: "fido", index: n }
+  if (tab === "ssh" && sshKeys && n < sshKeys.length) return { kind: "ssh", index: n, name: sshKeys[n] }
   return null
+}
+
+// One tab per section the key can do, in the card's order: "fido" (also
+// without the key, while keys are registered), "gpg", "ssh" (also while
+// ~/.ssh holds resident keys).
+function tabs(devices, credentials, card, sshKeys) {
+  var out = []
+  if (device(devices) !== null || (credentials && credentials.length > 0)) out.push("fido")
+  if (gpgVisible(card)) out.push("gpg")
+  if (sshVisible(devices) || (sshKeys && sshKeys.length > 0)) out.push("ssh")
+  return out
+}
+
+// The tab picked, while it is still there; the first one otherwise.
+function currentTab(tabs, chosen) {
+  if (!tabs || tabs.length === 0) return ""
+  return tabs.indexOf(chosen) >= 0 ? chosen : tabs[0]
+}
+
+// Ctrl+Tab and Ctrl+Shift+Tab: the next or previous tab (by 1 or -1),
+// round the ends.
+function nextTab(tabs, current, by) {
+  if (!tabs || tabs.length === 0) return ""
+  var at = Math.max(0, tabs.indexOf(current))
+  return tabs[(at + by + tabs.length * 2) % tabs.length]
 }
 
 // What a remove button asks to confirm: "fido:0", "ssh:<file>", "gpg".
@@ -119,6 +143,9 @@ if (typeof module !== "undefined") {
     keyStateKey: keyStateKey,
     ltr: ltr,
     removable: removable,
+    tabs: tabs,
+    currentTab: currentTab,
+    nextTab: nextTab,
     removeId: removeId,
     shortcut: shortcut
   }

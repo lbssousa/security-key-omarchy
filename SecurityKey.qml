@@ -10,17 +10,20 @@ import "SecurityKeyModel.js" as Model
 // Security key overlay (YubiKey and other FIDO2 keys), after the Security
 // page of lbssousa/noctalia: registers the key for sudo and polkit
 // (pam_u2f, the user's own ~/.config/Yubico/u2f_keys), imports the OpenPGP
-// key stored on its card, and copies its resident SSH keys into ~/.ssh. The
-// last two sections show only for keys that have those features. Summoned
+// key stored on its card, and copies its resident SSH keys into ~/.ssh. Each
+// of the three has its own tab; the last two show only for keys that have
+// those features. Summoned
 // with `omarchy-shell shell summon lbssousa.security-key '{}'`
 // (omarchy-security-key).
 //
 // Everything works from the keyboard: Tab walks the buttons, Enter
-// activates, and every action has its own key, shown on its button (Alt+R
-// registers, Alt+1-9 removes a registered key or an SSH key, counted down
-// the card, Alt+I imports the OpenPGP key, Alt+T trusts it, Alt+D removes it
-// from the keyring, Alt+S imports the SSH keys); removing asks again first; F5 refreshes, Escape cancels what
-// runs or closes. When the card is taller than the screen it scrolls: the
+// activates, Ctrl+Tab and Ctrl+Shift+Tab (or Ctrl+Page Down/Up) switch tabs,
+// and every action has its own key, shown on its button, which opens its
+// tab too (Alt+R registers, Alt+1-9 removes a registered key or an SSH key,
+// counted down the tab shown, Alt+I imports the OpenPGP key, Alt+T trusts
+// it, Alt+D removes it from the keyring, Alt+S imports the SSH keys);
+// removing asks again first; F5 refreshes, Escape cancels what runs or
+// closes. When the card is taller than the screen it scrolls: the
 // wheel, the scroll bar, Up/Down, Page Up/Down, Home/End, and Tab brings the
 // focused button into view. Actions that need the key's PIN ask for it in a dialog
 // over the card (PinDialog), which then waits for the touch.
@@ -60,6 +63,13 @@ Item {
   property string pinOp: ""
   property var pinState: ({ text: "", tone: "info" })
 
+  // The tab picked ("fido", "gpg", "ssh"); `tab` is the one shown, the
+  // first when the picked one went away with the key.
+  property string chosenTab: ""
+  readonly property var tabs: root.loaded && !root.helperLost
+    ? Model.tabs(root.devices, root.credentials, root.card, root.sshKeys) : []
+  readonly property string tab: Model.currentTab(root.tabs, root.chosenTab)
+
   // The last outcome, per section.
   property var status: ({ fido: null, gpg: null, ssh: null })
 
@@ -79,6 +89,7 @@ Item {
     root.op = ""
     root.pendingRemove = ""
     root.pinOp = ""
+    root.chosenTab = ""
     root.status = { fido: null, gpg: null, ssh: null }
     root.helperLost = false
     root.opened = true
@@ -103,12 +114,30 @@ Item {
     else root.open("{}")
   }
 
-  // The first field or button, or the card itself when there is none.
+  // The first field or button of the tab shown (past the tab bar), or the
+  // card itself when there is none.
   function refocus() {
     if (!root.opened) return
     keyCatcher.forceActiveFocus()
     var first = keyCatcher.nextItemInFocusChain(true)
-    if (first && first !== keyCatcher && first.visible) first.forceActiveFocus()
+    if (first === tabBar) first = tabBar.nextItemInFocusChain(true)
+    if (first && first !== keyCatcher && first !== tabBar && first.visible) first.forceActiveFocus()
+  }
+
+  // Shows a tab, back at the top of the card. A removal waiting for its
+  // confirmation in the tab left asks no more.
+  function selectTab(name) {
+    if (root.tabs.indexOf(name) < 0 || name === root.tab) return
+    root.chosenTab = name
+    root.pendingRemove = ""
+    scroller.scrollTo(0)
+  }
+
+  // Ctrl+Tab: the next tab, with the focus in it (or still on the tab bar).
+  function stepTab(by) {
+    if (root.tabs.length < 2) return
+    selectTab(Model.nextTab(root.tabs, root.tab, by))
+    if (!tabBar.activeFocus) root.refocus()
   }
 
   function setStatus(section, text, tone) {
@@ -169,6 +198,7 @@ Item {
 
   function closePin() {
     var section = Model.section(root.pinOp) === "ssh" ? sshSection : fidoSection
+    selectTab(Model.section(root.pinOp))
     root.pinOp = ""
     pinDialog.clear()
     Qt.callLater(function() {
@@ -276,22 +306,29 @@ Item {
   }
 
   // Direct keys for the actions (Alt+key, shown on each button); each works
-  // only while its button would. Returns whether the key was one of them.
+  // only while its button would, and shows its tab first. Returns whether
+  // the key was one of them.
   function altKey(key) {
     if (!root.opened || !root.loaded || root.helperLost || root.busy || root.pinOp !== "") return false
-    if (key === Qt.Key_R && fidoSection.visible && root.device !== null) {
+    var has = function(name) { return root.tabs.indexOf(name) >= 0 }
+    if (key === Qt.Key_R && has("fido") && root.device !== null) {
+      selectTab("fido")
       fidoSection.submit()
-    } else if (key === Qt.Key_I && gpgSection.visible && gpgSection.canImport) {
+    } else if (key === Qt.Key_I && has("gpg") && gpgSection.canImport) {
+      selectTab("gpg")
       root.run({ cmd: "gpg.import" })
-    } else if (key === Qt.Key_T && gpgSection.visible && gpgSection.canTrust) {
+    } else if (key === Qt.Key_T && has("gpg") && gpgSection.canTrust) {
+      selectTab("gpg")
       root.run({ cmd: "gpg.trust" })
-    } else if (key === Qt.Key_S && sshSection.visible && root.device !== null) {
+    } else if (key === Qt.Key_S && has("ssh") && root.device !== null) {
+      selectTab("ssh")
       sshSection.submit()
-    } else if (key === Qt.Key_D && gpgSection.visible && gpgSection.canRemove) {
+    } else if (key === Qt.Key_D && has("gpg") && gpgSection.canRemove) {
+      selectTab("gpg")
       root.remove("gpg")
       if (root.pendingRemove === "gpg") gpgSection.focusRemove()
-    } else if (key >= Qt.Key_1 && key <= Qt.Key_9 && Model.removable(root.credentials, root.sshKeys, key - Qt.Key_1) !== null) {
-      var item = Model.removable(root.credentials, root.sshKeys, key - Qt.Key_1)
+    } else if (key >= Qt.Key_1 && key <= Qt.Key_9 && Model.removable(root.tab, root.credentials, root.sshKeys, key - Qt.Key_1) !== null) {
+      var item = Model.removable(root.tab, root.credentials, root.sshKeys, key - Qt.Key_1)
       if (item.kind === "fido") {
         root.remove("fido", item.index)
         if (root.pendingRemove !== "") fidoSection.focusRemove(item.index)
@@ -355,6 +392,10 @@ Item {
         } else if (event.key === Qt.Key_F5) {
           root.refresh()
           event.accepted = true
+        } else if ((event.modifiers & Qt.ControlModifier) && root.tabs.length > 1
+                   && [Qt.Key_Tab, Qt.Key_Backtab, Qt.Key_PageDown, Qt.Key_PageUp].indexOf(event.key) >= 0) {
+          root.stepTab(event.key === Qt.Key_Tab || event.key === Qt.Key_PageDown ? 1 : -1)
+          event.accepted = true
         } else if (scroller.scrollKey(event.key)) {
           event.accepted = true
         } else if (event.modifiers & Qt.AltModifier) {
@@ -390,7 +431,9 @@ Item {
           // Under the PIN dialog: out of the Tab chain.
           enabled: root.pinOp === ""
           boundsBehavior: Flickable.StopAtBounds
-          interactive: contentHeight > height
+          // Not while the window has no size yet (a height below zero): a
+          // button focused then would scroll the card to a stale target.
+          interactive: height > 0 && contentHeight > height
 
           Controls.ScrollBar.vertical: Controls.ScrollBar { policy: Controls.ScrollBar.AsNeeded }
 
@@ -488,8 +531,11 @@ Item {
                   text: root.helperLost ? tr.t("securityKey.helperFailed")
                     : !root.loaded ? tr.t("securityKey.working")
                     : !root.device && !root.card ? tr.t("securityKey.connectHint")
+                    // What the key can do, unless the tabs below say it.
+                    : root.tabs.length > 1 ? ""
                     : [root.device ? "FIDO2" : "", root.card ? "OpenPGP" : "",
                        Model.sshVisible(root.devices) ? "SSH" : ""].filter(function(s) { return s !== "" }).join(" · ")
+                  visible: text !== ""
                   horizontalAlignment: Text.AlignLeft
                   wrapMode: Text.Wrap
                   color: root.helperLost ? root.urgent : root.foreground
@@ -510,72 +556,121 @@ Item {
               onClicked: root.refresh()
             }
 
-            FidoSection {
-              id: fidoSection
-              visible: root.loaded && !root.helperLost && (root.device !== null || root.credentials.length > 0)
+            // The tabs, when there is more than one; Ctrl+Tab walks them.
+            Item {
               width: parent.width
-              strings: tr
-              credentials: root.credentials
-              device: root.device
-              pam: root.pamState
-              sharedCount: root.sharedCount
-              busy: root.busy
-              running: Model.section(root.op) === "fido" && root.op !== "fido.remove" && root.pinOp === ""
-              pending: root.pendingRemove
-              statusText: root.statusOf("fido").text
-              statusTone: root.statusOf("fido").tone
-              fontFamily: root.fontFamily
-              foreground: root.foreground
-              accent: root.accent
-              urgent: root.urgent
-              onRegisterRequested: root.askPin("fido.register")
-              onRemoveRequested: function(index) { root.remove("fido", index) }
-              onCancelRequested: root.cancel()
+              visible: root.tabs.length > 1
+              height: tabBar.implicitHeight
+
+              ButtonGroup {
+                id: tabBar
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                options: root.tabs.map(function(name) {
+                  // "…" on a tab left while its action runs.
+                  var label = { fido: "FIDO2", gpg: "OpenPGP", ssh: "SSH" }[name]
+                  if (name !== root.tab && Model.section(root.op) === name) label += " …"
+                  return { value: name, label: label,
+                           icon: { fido: "󰌆", gpg: "󰷖", ssh: "󰣀" }[name] }
+                })
+                value: root.tab
+                foreground: root.foreground
+                background: root.background
+                accent: root.accent
+                fontFamily: root.fontFamily
+                onChanged: function(value) { root.selectTab(value) }
+              }
+
+              Text {
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                visible: tabBar.width + implicitWidth + Style.spacing.lg <= parent.width
+                textFormat: Text.PlainText
+                text: Model.ltr("Ctrl+Tab")
+                color: root.foreground
+                opacity: 0.45
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
             }
 
-            GpgSection {
-              id: gpgSection
-              visible: root.loaded && !root.helperLost && Model.gpgVisible(root.card)
+            // One section at a time, as tall as the tallest, so the card
+            // keeps its size from tab to tab.
+            Item {
               width: parent.width
-              strings: tr
-              card: root.card
-              keyState: root.keyState
-              trusted: root.trusted
-              busy: root.busy
-              running: Model.section(root.op) === "gpg"
-              pending: root.pendingRemove
-              statusText: root.statusOf("gpg").text
-              statusTone: root.statusOf("gpg").tone
-              fontFamily: root.fontFamily
-              foreground: root.foreground
-              accent: root.accent
-              urgent: root.urgent
-              onImportRequested: root.run({ cmd: "gpg.import" })
-              onTrustRequested: root.run({ cmd: "gpg.trust" })
-              onRemoveRequested: root.remove("gpg")
-            }
+              visible: root.tab !== ""
+              implicitHeight: Math.max(root.tabs.indexOf("fido") >= 0 ? fidoSection.implicitHeight : 0,
+                                       root.tabs.indexOf("gpg") >= 0 ? gpgSection.implicitHeight : 0,
+                                       root.tabs.indexOf("ssh") >= 0 ? sshSection.implicitHeight : 0)
 
-            SshSection {
-              id: sshSection
-              // Also without the key, while there are SSH keys to remove.
-              visible: root.loaded && !root.helperLost && (Model.sshVisible(root.devices) || root.sshKeys.length > 0)
-              width: parent.width
-              strings: tr
-              device: root.device
-              present: root.sshKeys
-              indexOffset: root.credentials.length
-              pending: root.pendingRemove
-              busy: root.busy
-              running: Model.section(root.op) === "ssh" && root.op !== "ssh.remove" && root.pinOp === ""
-              statusText: root.statusOf("ssh").text
-              statusTone: root.statusOf("ssh").tone
-              fontFamily: root.fontFamily
-              foreground: root.foreground
-              accent: root.accent
-              urgent: root.urgent
-              onImportRequested: root.askPin("ssh.import")
-              onRemoveRequested: function(name) { root.remove("ssh", name) }
-              onCancelRequested: root.cancel()
+              FidoSection {
+                id: fidoSection
+                visible: root.tab === "fido"
+                width: parent.width
+                height: parent.height
+                strings: tr
+                credentials: root.credentials
+                device: root.device
+                pam: root.pamState
+                sharedCount: root.sharedCount
+                busy: root.busy
+                running: Model.section(root.op) === "fido" && root.op !== "fido.remove" && root.pinOp === ""
+                pending: root.pendingRemove
+                statusText: root.statusOf("fido").text
+                statusTone: root.statusOf("fido").tone
+                fontFamily: root.fontFamily
+                foreground: root.foreground
+                accent: root.accent
+                urgent: root.urgent
+                onRegisterRequested: root.askPin("fido.register")
+                onRemoveRequested: function(index) { root.remove("fido", index) }
+                onCancelRequested: root.cancel()
+              }
+
+              GpgSection {
+                id: gpgSection
+                visible: root.tab === "gpg"
+                width: parent.width
+                height: parent.height
+                strings: tr
+                card: root.card
+                keyState: root.keyState
+                trusted: root.trusted
+                busy: root.busy
+                running: Model.section(root.op) === "gpg"
+                pending: root.pendingRemove
+                statusText: root.statusOf("gpg").text
+                statusTone: root.statusOf("gpg").tone
+                fontFamily: root.fontFamily
+                foreground: root.foreground
+                accent: root.accent
+                urgent: root.urgent
+                onImportRequested: root.run({ cmd: "gpg.import" })
+                onTrustRequested: root.run({ cmd: "gpg.trust" })
+                onRemoveRequested: root.remove("gpg")
+              }
+
+              SshSection {
+                id: sshSection
+                visible: root.tab === "ssh"
+                width: parent.width
+                height: parent.height
+                strings: tr
+                device: root.device
+                present: root.sshKeys
+                pending: root.pendingRemove
+                busy: root.busy
+                running: Model.section(root.op) === "ssh" && root.op !== "ssh.remove" && root.pinOp === ""
+                statusText: root.statusOf("ssh").text
+                statusTone: root.statusOf("ssh").tone
+                fontFamily: root.fontFamily
+                foreground: root.foreground
+                accent: root.accent
+                urgent: root.urgent
+                onImportRequested: root.askPin("ssh.import")
+                onRemoveRequested: function(name) { root.remove("ssh", name) }
+                onCancelRequested: root.cancel()
+              }
             }
           }
         }
