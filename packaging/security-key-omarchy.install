@@ -1,0 +1,21 @@
+post_install() {
+  cat <<'EOT'
+==> Enable the overlay in the shell, per user:
+      ln -sfn /usr/share/security-key-omarchy/plugin ~/.config/omarchy/plugins/lbssousa.security-key
+      omarchy-shell shell rescanPlugins
+      omarchy-shell shell enablePlugin lbssousa.security-key '{}'
+    (the rescan lets a running shell see the new plugin; enablePlugin
+    answers "unknown" without it)
+    then open it with omarchy-security-key.
+==> It registers keys in each user's ~/.config/Yubico/u2f_keys. sudo and
+    polkit read them there only when their pam_u2f line has no authfile=
+    (Omarchy's own setup pins /etc/fido2/fido2); the overlay says so.
+==> With omarchy-multiuser, Setup > Security > FIDO2 opens it already.
+    Without it, point the menu at it in ~/.config/omarchy/extensions/omarchy-menu.jsonc:
+      "setup.security.fido2": {"action":"omarchy-shell shell summon lbssousa.security-key '{}'"},
+EOT
+}
+
+post_upgrade() {
+  echo '==> Restart the shell (omarchy-restart-shell) to load the updated overlay.'
+}

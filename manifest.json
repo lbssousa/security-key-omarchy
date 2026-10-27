@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "lbssousa.security-key",
+  "name": "Security Key",
+  "version": "0.1.0",
+  "author": "Laércio de Sousa",
+  "license": "MIT",
+  "description": "Register a FIDO2 security key (YubiKey…) for sudo and polkit, import its OpenPGP key and its resident SSH keys, from a keyboard-friendly overlay styled like the polkit agent.",
+  "homepage": "https://github.com/lbssousa/security-key-omarchy",
+  "repository": "https://github.com/lbssousa/security-key-omarchy",
+  "keywords": [
+    "yubikey",
+    "fido2",
+    "u2f",
+    "gpg",
+    "ssh",
+    "security"
+  ],
+  "kinds": [
+    "overlay"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "SecurityKey.qml"
+  }
+}

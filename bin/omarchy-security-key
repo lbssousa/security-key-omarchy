@@ -1,0 +1,19 @@
+#!/bin/bash
+
+# omarchy:summary=Register your security key, import its OpenPGP and SSH keys
+#
+# Opens the lbssousa.security-key overlay in the running omarchy-shell. Falls
+# back to the terminal FIDO2 setup when the shell or the plugin isn't there.
+
+set -euo pipefail
+
+if [[ $(omarchy-shell shell summon lbssousa.security-key '{}' 2>/dev/null) == ok ]]; then
+  exit 0
+fi
+
+echo "The security key plugin isn't enabled in the shell; enable it with:" >&2
+echo "  omarchy-shell shell rescanPlugins" >&2
+echo "  omarchy-shell shell enablePlugin lbssousa.security-key '{}'" >&2
+fallback=omarchy-setup-security-fido2
+command -v omarchy-mu-setup-security-fido2 >/dev/null && fallback=omarchy-mu-setup-security-fido2
+exec omarchy-launch-floating-terminal-with-presentation "$fallback"

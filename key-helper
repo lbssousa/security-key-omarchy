@@ -1,0 +1,809 @@
+#!/usr/bin/env python3
+"""Talks to the security key for the lbssousa.security-key plugin.
+
+The overlay runs this helper while it is open: one JSON command per line on
+stdin, one JSON event per line on stdout. Everything it does goes through the
+same tools a terminal would use (fido2-token, pamu2fcfg, gpg, ssh-keygen),
+as the user, without privileges. PINs live in memory for the one command
+that needs them and are never logged.
+
+Commands:
+  {"cmd":"refresh"}
+  {"cmd":"fido.register","pin":"…"}
+  {"cmd":"fido.remove","index":0}
+  {"cmd":"gpg.import"}
+  {"cmd":"gpg.trust"}
+  {"cmd":"gpg.remove"}                 (the card's key out of the keyring: public
+                                          key and the stubs pointing at the card)
+  {"cmd":"ssh.import","pin":"…"}
+  {"cmd":"ssh.remove","name":"…"}      (one of sshKeys, with its .pub)
+  {"cmd":"cancel"}
+
+Events:
+  {"type":"state","devices":[{"path","name","rk","clientPin"}],
+   "credentials":[{"handle","label"}],"authfile",
+   "pam":{"sudo":{"u2f","authfile"},"polkit":{…}},"sharedCount",
+   "card":null|{"vendor","serial","holder","url","fingerprints"},
+   "keyState":"none"|"missing"|"public"|"ready","trusted",
+   "sshKeys":[…]}
+  {"type":"busy","op","stage"}          (stage "touch" while waiting for a touch)
+  {"type":"done","op",…}               (fido.register, fido.remove, gpg.import,
+                                          gpg.trust, gpg.remove, ssh.import with
+                                          "imported"/"skipped", ssh.remove with "name")
+  {"type":"error","op","code","detail"}
+  {"type":"cancelled","op"}
+
+It is also ssh-keygen's SSH_ASKPASS, run as `key-helper <prompt>` like any
+askpass program: with SECURITY_KEY_ASKPASS_SOCKET in its environment (set only
+for ssh-keygen) it asks the running helper for the PIN over that private
+socket, prints it and exits.
+"""
+
+import asyncio
+import json
+import os
+import re
+import shutil
+import signal
+import socket
+import sys
+import tempfile
+
+TOUCH_TIMEOUT_S = 60
+GPG_TIMEOUT_S = 30
+NETWORK_TIMEOUT_S = 45
+PROBE_TIMEOUT_S = 10
+POLL_S = 2
+ASKPASS_ENV = "SECURITY_KEY_ASKPASS_SOCKET"
+
+# libfido2's error names, as pamu2fcfg and ssh-keygen print them, to the
+# codes the overlay explains.
+FIDO_ERRORS = (
+    ("PIN_INVALID", "pin-invalid"),
+    ("PIN incorrect", "pin-invalid"),
+    ("PIN_AUTH_BLOCKED", "pin-blocked"),
+    ("PIN_BLOCKED", "pin-blocked"),
+    ("Too many incorrect PINs", "pin-blocked"),
+    ("PIN_REQUIRED", "pin-required"),
+    ("pin required", "pin-required"),
+    ("failed to read pin", "pin-required"),
+    ("couldn't read PIN", "pin-required"),
+    ("ACTION_TIMEOUT", "timeout"),
+    ("USER_ACTION_TIMEOUT", "timeout"),
+    ("No device found", "no-device"),
+    ("No FIDO SecurityKeyProvider", "no-device"),
+    ("device not found", "no-device"),
+    ("fido_dev_open", "no-device"),
+    ("No keys to download", "ssh-none"),
+    ("no keys found", "ssh-none"),
+    ("returned no keys", "ssh-none"),
+)
+
+
+def log(*parts):
+    print("key-helper:", *parts, file=sys.stderr, flush=True)
+
+
+def secret_on_disk(colons):
+    """Whether a --list-secret-keys --with-colons listing has a secret part that
+    lives in the keyring rather than on a card. Field 15 holds the card's serial
+    for a stub, "#" for a stub whose card is away, "+" for a real secret."""
+    for line in colons.splitlines():
+        fields = line.split(":")
+        if fields[0] in ("sec", "ssb"):
+            token = fields[14] if len(fields) > 14 else ""
+            if token in ("", "+"):
+                return True
+    return False
+
+
+def fido_error(text, pin=""):
+    # Asked for a PIN it wasn't given (pamu2fcfg then fails on the empty one).
+    if not pin and "Enter PIN" in text:
+        return "pin-required"
+    for needle, code in FIDO_ERRORS:
+        if needle in text:
+            return code
+    return "generic"
+
+
+def last_line(text):
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    return lines[-1] if lines else ""
+
+
+# -- parsers (pure, tested) ----------------------------------------------------
+
+def parse_devices(text):
+    """`fido2-token -L`: "/dev/hidraw1: vendor=0x1050, product=0x0407 (Yubico YubiKey …)"."""
+    devices = []
+    for line in text.splitlines():
+        path, sep, rest = line.partition(": ")
+        if not sep or not path.startswith("/"):
+            continue
+        name = re.search(r"\((.*)\)\s*$", rest)
+        devices.append({"path": path, "name": name.group(1) if name else rest.strip()})
+    return devices
+
+
+def parse_info(text):
+    """`fido2-token -I <dev>`: the options and PIN retries that decide what the overlay offers."""
+    options = []
+    retries = -1
+    for line in text.splitlines():
+        key, _, value = line.partition(":")
+        key = key.strip()
+        if key == "options":
+            options = [o.strip() for o in value.split(",") if o.strip()]
+        elif key == "pin retries":
+            try:
+                retries = int(value.strip())
+            except ValueError:
+                pass
+    return {"rk": "rk" in options, "clientPin": "clientPin" in options, "pinRetries": retries}
+
+
+def unescape_colons(value):
+    # gpg --with-colons escapes ':' and control characters as "\xHH".
+    return re.sub(r"\\x([0-9A-Fa-f]{2})", lambda m: chr(int(m.group(1), 16)), value)
+
+
+def parse_card(text):
+    """`gpg --card-status --with-colons`; None without an OpenPGP card."""
+    fields = {}
+    for line in text.splitlines():
+        parts = line.split(":")
+        fields.setdefault(parts[0], parts[1:])
+    reader = fields.get("Reader")
+    if reader is None or "openpgp-card" not in ":".join(reader):
+        return None
+
+    def get(name, index):
+        values = fields.get(name, [])
+        return unescape_colons(values[index]) if index < len(values) else ""
+
+    holder = " ".join(part for part in (get("name", 0), get("name", 1)) if part)
+    fingerprints = [f for f in fields.get("fpr", []) if re.fullmatch(r"[0-9A-Fa-f]{40,64}", f)]
+    return {
+        "vendor": get("vendor", 1),
+        "serial": get("serial", 0),
+        "holder": holder,
+        "url": get("url", 0),
+        "fingerprints": fingerprints,
+    }
+
+
+def primary_key(text):
+    """The primary fingerprint and ownertrust of `gpg --list-keys --with-colons`."""
+    trust = ""
+    for line in text.splitlines():
+        parts = line.split(":")
+        if parts[0] in ("pub", "sec") and not trust:
+            trust = parts[8] if len(parts) > 8 else ""
+        elif parts[0] == "fpr" and len(parts) > 9:
+            return parts[9], trust
+    return "", trust
+
+
+def credential_handles(line, user):
+    """The credentials on <user>'s line of a pam_u2f authfile ("user:cred[:cred…]")."""
+    if not line.startswith(user + ":"):
+        return []
+    return [c for c in line[len(user) + 1:].split(":") if c]
+
+
+def credential_label(credential):
+    # "keyHandle,publicKey,coseType,options": a short, stable prefix of the
+    # key handle tells two keys apart.
+    handle = credential.split(",", 1)[0]
+    return handle[:10]
+
+
+def merge_credentials(existing, new):
+    """Appends credentials not registered yet (same key handle = same key)."""
+    merged = list(existing)
+    handles = {c.split(",", 1)[0] for c in existing}
+    for credential in new:
+        handle = credential.split(",", 1)[0]
+        if handle and handle not in handles:
+            merged.append(credential)
+            handles.add(handle)
+    return merged
+
+
+def pam_u2f(text):
+    """Whether a PAM file uses pam_u2f, and the authfile it fixes ("" = pam_u2f's per-user default)."""
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("#") or "pam_u2f.so" not in line:
+            continue
+        authfile = ""
+        for word in line.split():
+            if word.startswith("authfile="):
+                authfile = word[len("authfile="):]
+        return {"u2f": True, "authfile": authfile}
+    return {"u2f": False, "authfile": ""}
+
+
+# -- the session ---------------------------------------------------------------
+
+class Result:
+    def __init__(self, code, out="", err=""):
+        self.code = code
+        self.out = out
+        self.err = err
+
+
+class Runner:
+    """Runs one program at a time for an operation; cancel() kills it."""
+
+    def __init__(self):
+        self.proc = None
+
+    async def run(self, args, stdin=None, env=None, cwd=None, timeout=None):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE, env=env, cwd=cwd, start_new_session=True)
+        except FileNotFoundError:
+            return Result(127, "", "%s: not found" % args[0])
+        self.proc = proc
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(stdin.encode() if stdin else b""), timeout)
+        except asyncio.TimeoutError:
+            self.kill(proc)
+            await proc.wait()
+            return Result(-1, "", "timeout")
+        finally:
+            if self.proc is proc:
+                self.proc = None
+        return Result(proc.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace"))
+
+    def kill(self, proc=None):
+        proc = proc or self.proc
+        if proc is not None and proc.returncode is None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+    def cancel(self):
+        self.kill()
+
+
+class Paths:
+    def __init__(self, home=None, config=None, pam_dirs=None, runtime=None):
+        self.home = home or os.path.expanduser("~")
+        # pam_u2f's default authfile: $XDG_CONFIG_HOME/Yubico/u2f_keys, else ~/.config.
+        self.config = config or os.environ.get("XDG_CONFIG_HOME") or os.path.join(self.home, ".config")
+        self.pam_dirs = pam_dirs or ["/etc/pam.d", "/usr/lib/pam.d"]
+        self.runtime = runtime or os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+
+    @property
+    def authfile(self):
+        return os.path.join(self.config, "Yubico", "u2f_keys")
+
+    @property
+    def ssh(self):
+        return os.path.join(self.home, ".ssh")
+
+    def pam_file(self, service):
+        for directory in self.pam_dirs:
+            path = os.path.join(directory, service)
+            if os.path.isfile(path):
+                return path
+        return ""
+
+
+class Session:
+    def __init__(self, runner, emit, paths, user, askpass_command):
+        self.runner = runner
+        self.emit = emit
+        self.paths = paths
+        self.user = user
+        self.askpass_command = askpass_command
+        self.op = None
+        self.task = None
+        # A command that arrived while a refresh (or the hot-plug poll) ran.
+        self.queued = None
+        self.devices = []
+        self.card = None
+        self.primary = ""
+        self.closed = False
+
+    # -- commands --------------------------------------------------------
+
+    def handle_line(self, line):
+        line = line.strip()
+        if not line:
+            return
+        try:
+            command = json.loads(line)
+        except ValueError:
+            log("ignoring invalid JSON")
+            return
+        if not isinstance(command, dict):
+            return
+        name = command.get("cmd")
+        pin = command.get("pin") if isinstance(command.get("pin"), str) else ""
+        if name == "cancel":
+            self.cancel()
+        elif name == "refresh":
+            self.start("refresh", self.refresh())
+        elif name == "fido.register":
+            self.start(name, self.fido_register(pin))
+        elif name == "fido.remove" and isinstance(command.get("index"), int):
+            self.start(name, self.fido_remove(command["index"]))
+        elif name == "gpg.import":
+            self.start(name, self.gpg_import())
+        elif name == "gpg.trust":
+            self.start(name, self.gpg_trust())
+        elif name == "gpg.remove":
+            self.start(name, self.gpg_remove())
+        elif name == "ssh.import":
+            self.start(name, self.ssh_import(pin))
+        elif name == "ssh.remove" and isinstance(command.get("name"), str):
+            self.start(name, self.ssh_remove(command["name"]))
+
+    def start(self, op, coroutine):
+        if self.op == "refresh" and op != "refresh" and self.queued is None and not self.closed:
+            self.queued = (op, coroutine)
+            return True
+        if self.op is not None or self.closed:
+            coroutine.close()
+            return False
+        self.op = op
+        self.task = asyncio.ensure_future(self.guard(op, coroutine))
+        return True
+
+    async def guard(self, op, coroutine):
+        try:
+            await coroutine
+        except asyncio.CancelledError:
+            self.emit({"type": "cancelled", "op": op})
+        except Exception as e:  # noqa: BLE001 - report, keep serving
+            log("%s failed: %r" % (op, e))
+            self.emit({"type": "error", "op": op, "code": "generic", "detail": str(e)})
+        finally:
+            self.op = None
+            self.task = None
+            queued, self.queued = self.queued, None
+            if queued is not None:
+                self.start(*queued)
+
+    def cancel(self):
+        if self.queued is not None:
+            op, coroutine = self.queued
+            self.queued = None
+            coroutine.close()
+            self.emit({"type": "cancelled", "op": op})
+            return
+        if self.task is not None and self.op != "refresh":
+            self.runner.cancel()
+            self.task.cancel()
+
+    def shutdown(self):
+        self.closed = True
+        if self.queued is not None:
+            self.queued[1].close()
+            self.queued = None
+        if self.task is not None:
+            self.runner.cancel()
+            self.task.cancel()
+
+    def fail(self, op, code, detail=""):
+        self.emit({"type": "error", "op": op, "code": code, "detail": detail})
+
+    # -- state -----------------------------------------------------------
+
+    async def list_devices(self):
+        result = await self.runner.run(["fido2-token", "-L"], timeout=PROBE_TIMEOUT_S)
+        return parse_devices(result.out) if result.code == 0 else []
+
+    async def refresh(self):
+        devices = await self.list_devices()
+        for device in devices:
+            info = await self.runner.run(["fido2-token", "-I", device["path"]], timeout=PROBE_TIMEOUT_S)
+            device.update(parse_info(info.out) if info.code == 0 else parse_info(""))
+        self.devices = devices
+        await self.load_card()
+        await self.emit_state()
+
+    async def load_card(self):
+        result = await self.runner.run(["gpg", "--card-status", "--with-colons"], timeout=PROBE_TIMEOUT_S)
+        self.card = parse_card(result.out) if result.code == 0 else None
+
+    async def key_state(self):
+        """missing / public / ready for the card's key, and whether it is ultimately trusted."""
+        self.primary = ""
+        if not self.card or not self.card["fingerprints"]:
+            return "none", False
+        fpr = self.card["fingerprints"][0]
+        public = await self.runner.run(["gpg", "--list-keys", "--with-colons", fpr], timeout=GPG_TIMEOUT_S)
+        if public.code != 0:
+            return "missing", False
+        self.primary, trust = primary_key(public.out)
+        secret = await self.runner.run(["gpg", "--list-secret-keys", "--with-colons", fpr], timeout=GPG_TIMEOUT_S)
+        return ("ready" if secret.code == 0 and secret.out.strip() else "public"), trust == "u"
+
+    def read_credentials(self):
+        try:
+            with open(self.paths.authfile, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            return [], []
+        mine = []
+        others = []
+        for line in lines:
+            if line.startswith(self.user + ":"):
+                mine.extend(credential_handles(line, self.user))
+            elif line.strip():
+                others.append(line)
+        return mine, others
+
+    def pam_state(self):
+        state = {}
+        for service, name in (("sudo", "sudo"), ("polkit-1", "polkit")):
+            path = self.paths.pam_file(service)
+            try:
+                with open(path, encoding="utf-8") as f:
+                    state[name] = pam_u2f(f.read())
+            except OSError:
+                state[name] = {"u2f": False, "authfile": ""}
+        return state
+
+    def shared_count(self, pam):
+        """How many of the user's keys a fixed, shared authfile (Omarchy's /etc/fido2/fido2) holds."""
+        for state in pam.values():
+            path = state["authfile"]
+            if state["u2f"] and path and path != self.paths.authfile:
+                try:
+                    with open(path, encoding="utf-8") as f:
+                        return sum(len(credential_handles(line, self.user)) for line in f.read().splitlines())
+                except OSError:
+                    return -1
+        return 0
+
+    def ssh_keys(self):
+        try:
+            names = os.listdir(self.paths.ssh)
+        except OSError:
+            return []
+        return sorted(n for n in names if re.match(r"id_\w+_sk_rk", n) and not n.endswith(".pub"))
+
+    async def emit_state(self):
+        key_state, trusted = await self.key_state()
+        credentials, _ = self.read_credentials()
+        pam = self.pam_state()
+        self.emit({
+            "type": "state",
+            "devices": self.devices,
+            "credentials": [{"handle": c.split(",", 1)[0], "label": credential_label(c)} for c in credentials],
+            "authfile": self.paths.authfile,
+            "pam": pam,
+            "sharedCount": self.shared_count(pam),
+            "card": self.card,
+            "keyState": key_state,
+            "trusted": trusted,
+            "sshKeys": self.ssh_keys(),
+        })
+
+    async def poll(self):
+        """Notices a key plugged in or pulled out while nothing else runs."""
+        devices = await self.list_devices()
+        if [d["path"] for d in devices] != [d["path"] for d in self.devices]:
+            await self.refresh()
+
+    # -- FIDO2 -----------------------------------------------------------
+
+    async def fido_register(self, pin):
+        op = "fido.register"
+        if not self.devices:
+            self.fail(op, "no-device")
+            return
+        self.emit({"type": "busy", "op": op, "stage": "touch"})
+        # Without a terminal pamu2fcfg reads the PIN from stdin.
+        result = await self.runner.run(["pamu2fcfg", "-u", self.user], stdin=(pin + "\n") if pin else None,
+                                       timeout=TOUCH_TIMEOUT_S)
+        if result.code != 0:
+            code = "timeout" if result.err == "timeout" else fido_error(result.err, pin)
+            log("pamu2fcfg failed:", last_line(result.err))
+            self.fail(op, code, last_line(result.err))
+            # The key may have been pulled out, or its PIN retries changed.
+            await self.refresh()
+            return
+        new = credential_handles(last_line(result.out), self.user)
+        if not new:
+            self.fail(op, "generic", "pamu2fcfg")
+            return
+        mine, others = self.read_credentials()
+        if not self.write_credentials(merge_credentials(mine, new), others):
+            self.fail(op, "write-failed", self.paths.authfile)
+            return
+        self.emit({"type": "done", "op": op})
+        await self.emit_state()
+
+    async def fido_remove(self, index):
+        op = "fido.remove"
+        mine, others = self.read_credentials()
+        if not 0 <= index < len(mine):
+            self.fail(op, "generic", "no such key")
+            return
+        del mine[index]
+        if not self.write_credentials(mine, others):
+            self.fail(op, "write-failed", self.paths.authfile)
+            return
+        self.emit({"type": "done", "op": op})
+        await self.emit_state()
+
+    def write_credentials(self, mine, others):
+        """Rewrites the authfile with <user>'s line (dropped when empty), atomically, 0600."""
+        lines = list(others)
+        if mine:
+            lines.append(":".join([self.user] + mine))
+        path = self.paths.authfile
+        directory = os.path.dirname(path)
+        try:
+            os.makedirs(directory, mode=0o700, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix=".u2f_keys.", dir=directory)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write("".join(line + "\n" for line in lines))
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, path)
+            except BaseException:
+                os.unlink(tmp)
+                raise
+        except OSError as e:
+            log("could not write %s: %s" % (path, e))
+            return False
+        return True
+
+    # -- OpenPGP card ----------------------------------------------------
+
+    async def gpg_import(self):
+        op = "gpg.import"
+        if not self.card:
+            self.fail(op, "no-card")
+            return
+        self.emit({"type": "busy", "op": op, "stage": "fetch"})
+        imported = False
+        url = self.card.get("url", "")
+        if url.startswith(("https://", "http://", "hkps://", "hkp://")):
+            result = await self.runner.run(["gpg", "--fetch-keys", url], timeout=NETWORK_TIMEOUT_S)
+            imported = result.code == 0
+            if not imported:
+                log("gpg --fetch-keys failed:", last_line(result.err))
+        if not imported and self.card["fingerprints"]:
+            result = await self.runner.run(["gpg", "--recv-keys", self.card["fingerprints"][0]],
+                                           timeout=NETWORK_TIMEOUT_S)
+            imported = result.code == 0
+            if not imported:
+                log("gpg --recv-keys failed:", last_line(result.err))
+        if not imported:
+            self.fail(op, "import-failed")
+            await self.emit_state()
+            return
+        # Reading the card again creates the secret-key stubs that point gpg at it.
+        await self.runner.run(["gpg", "--card-status"], timeout=PROBE_TIMEOUT_S)
+        self.emit({"type": "done", "op": op})
+        await self.emit_state()
+
+    async def gpg_trust(self):
+        op = "gpg.trust"
+        await self.key_state()
+        if not self.primary:
+            self.fail(op, "trust-failed")
+            return
+        result = await self.runner.run(["gpg", "--import-ownertrust"], stdin="%s:6:\n" % self.primary,
+                                       timeout=GPG_TIMEOUT_S)
+        if result.code != 0:
+            self.fail(op, "trust-failed", last_line(result.err))
+            return
+        self.emit({"type": "done", "op": op})
+        await self.emit_state()
+
+    async def gpg_remove(self):
+        """Takes the card's key out of the keyring. Only ever stubs: a secret
+        part kept on disk would be lost for good, so then nothing is removed."""
+        op = "gpg.remove"
+        await self.key_state()
+        if not self.primary:
+            self.fail(op, "remove-failed", "not in the keyring")
+            return
+        secret = await self.runner.run(["gpg", "--list-secret-keys", "--with-colons", self.primary],
+                                       timeout=GPG_TIMEOUT_S)
+        has_secret = secret.code == 0 and secret.out.strip() != ""
+        if has_secret and secret_on_disk(secret.out):
+            self.fail(op, "secret-on-disk")
+            return
+        what = "--delete-secret-and-public-keys" if has_secret else "--delete-keys"
+        result = await self.runner.run(["gpg", "--batch", "--yes", what, self.primary], timeout=GPG_TIMEOUT_S)
+        if result.code != 0:
+            self.fail(op, "remove-failed", last_line(result.err))
+            await self.emit_state()
+            return
+        self.emit({"type": "done", "op": op})
+        await self.emit_state()
+
+    # -- resident SSH keys -----------------------------------------------
+
+    async def ssh_import(self, pin):
+        op = "ssh.import"
+        if not self.devices:
+            self.fail(op, "no-device")
+            return
+        workdir = tempfile.mkdtemp(prefix="security-key-", dir=self.paths.runtime)
+        server = None
+        try:
+            sock_path = os.path.join(workdir, "askpass")
+            server = await serve_pin(sock_path, pin)
+            env = dict(os.environ)
+            env.update({"SSH_ASKPASS": self.askpass_command, "SSH_ASKPASS_REQUIRE": "force", ASKPASS_ENV: sock_path})
+            env.setdefault("DISPLAY", ":0")
+            self.emit({"type": "busy", "op": op, "stage": "touch"})
+            result = await self.runner.run(["ssh-keygen", "-K", "-N", ""], env=env, cwd=workdir,
+                                           timeout=TOUCH_TIMEOUT_S)
+            found = sorted(n for n in os.listdir(workdir) if re.match(r"id_\w+_sk_rk", n))
+            if result.code != 0 and not found:
+                code = "timeout" if result.err == "timeout" else fido_error(result.err, pin)
+                log("ssh-keygen -K failed:", last_line(result.err))
+                self.fail(op, code, last_line(result.err))
+                # The key may have been pulled out, or its PIN retries changed.
+                await self.refresh()
+                return
+            imported, skipped = self.install_ssh_keys(workdir, found)
+            if not imported and not skipped:
+                self.fail(op, "ssh-none")
+                return
+            self.emit({"type": "done", "op": op, "imported": imported, "skipped": skipped})
+            await self.emit_state()
+        finally:
+            if server is not None:
+                server.close()
+            shutil.rmtree(workdir, ignore_errors=True)
+
+    async def ssh_remove(self, name):
+        """Deletes one downloaded key (and its .pub) from ~/.ssh; only names
+        sshKeys lists. The key itself stays on the security key."""
+        op = "ssh.remove"
+        if name not in self.ssh_keys():
+            self.fail(op, "remove-failed", name)
+            return
+        try:
+            for n in (name, name + ".pub"):
+                path = os.path.join(self.paths.ssh, n)
+                if os.path.lexists(path):
+                    os.unlink(path)
+        except OSError as e:
+            self.fail(op, "remove-failed", str(e))
+            await self.emit_state()
+            return
+        self.emit({"type": "done", "op": op, "name": name})
+        await self.emit_state()
+
+    def install_ssh_keys(self, workdir, names):
+        """Moves the downloaded key files into ~/.ssh, never over an existing file."""
+        os.makedirs(self.paths.ssh, mode=0o700, exist_ok=True)
+        imported = []
+        skipped = []
+        for name in names:
+            if name.endswith(".pub"):
+                continue
+            pair = [name, name + ".pub"]
+            if any(os.path.exists(os.path.join(self.paths.ssh, n)) for n in pair):
+                skipped.append(name)
+                continue
+            for n, mode in zip(pair, (0o600, 0o644)):
+                source = os.path.join(workdir, n)
+                if os.path.exists(source):
+                    target = os.path.join(self.paths.ssh, n)
+                    shutil.copyfile(source, target)
+                    os.chmod(target, mode)
+            imported.append(name)
+        return imported, skipped
+
+
+async def serve_pin(path, pin):
+    """Answers the first PIN prompt of our own askpass over a socket only we can reach."""
+    given = False
+
+    async def answer(reader, writer):
+        nonlocal given
+        prompt = (await reader.readline()).decode("utf-8", "replace")
+        reply = ""
+        if pin and not given and "PIN" in prompt:
+            reply = pin
+            given = True
+        writer.write((reply + "\n").encode())
+        await writer.drain()
+        writer.close()
+
+    old = os.umask(0o077)
+    try:
+        return await asyncio.start_unix_server(answer, path=path)
+    finally:
+        os.umask(old)
+
+
+def askpass(prompt):
+    """SSH_ASKPASS mode: prints the PIN the helper hands over, or fails."""
+    path = os.environ.get(ASKPASS_ENV, "")
+    if not path:
+        return 1
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.connect(path)
+            s.sendall((prompt.replace("\n", " ") + "\n").encode())
+            reply = b""
+            while not reply.endswith(b"\n"):
+                chunk = s.recv(1024)
+                if not chunk:
+                    break
+                reply += chunk
+    except OSError:
+        return 1
+    answer = reply.decode("utf-8", "replace").rstrip("\n")
+    if not answer:
+        return 1
+    print(answer)
+    return 0
+
+
+async def serve():
+    loop = asyncio.get_running_loop()
+
+    def emit(event):
+        try:
+            print(json.dumps(event), flush=True)
+        except BrokenPipeError:
+            stop.set()
+
+    stop = asyncio.Event()
+    command = os.path.abspath(__file__)
+    session = Session(Runner(), emit, Paths(), os.environ.get("USER") or os.getlogin(), command)
+
+    buffer = b""
+
+    def on_stdin():
+        nonlocal buffer
+        try:
+            chunk = os.read(sys.stdin.fileno(), 4096)
+        except OSError:
+            chunk = b""
+        if not chunk:
+            loop.remove_reader(sys.stdin.fileno())
+            stop.set()
+            return
+        buffer += chunk
+        while b"\n" in buffer:
+            line, buffer = buffer.split(b"\n", 1)
+            session.handle_line(line.decode("utf-8", "replace"))
+
+    loop.add_reader(sys.stdin.fileno(), on_stdin)
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(signum, stop.set)
+
+    session.start("refresh", session.refresh())
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), POLL_S)
+        except asyncio.TimeoutError:
+            if session.op is None:
+                session.start("refresh", session.poll())
+    session.shutdown()
+    await asyncio.sleep(0.2)
+
+
+def main():
+    # ssh-keygen runs SSH_ASKPASS with the prompt as its only argument; the
+    # socket in the environment is what says this run is the askpass.
+    if os.environ.get(ASKPASS_ENV):
+        sys.exit(askpass(" ".join(sys.argv[1:])))
+    asyncio.run(serve())
+
+
+if __name__ == "__main__":
+    main()

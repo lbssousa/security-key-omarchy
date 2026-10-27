@@ -1,0 +1,35 @@
+# Maintainer: Laércio de Sousa <laercio@sivali.sousa.nom.br>
+#
+# Builds from the repository this PKGBUILD lives in (the parent of
+# $startdir), so `makepkg` in packaging/ packages the working tree as is.
+
+pkgname=security-key-omarchy
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Register a FIDO2 security key for sudo and polkit and import its OpenPGP and SSH keys, from an omarchy-shell overlay'
+arch=(any)
+url='https://github.com/lbssousa/security-key-omarchy'
+license=(MIT)
+depends=(omarchy python libfido2 pam-u2f gnupg openssh)
+checkdepends=(nodejs)
+install=security-key-omarchy.install
+
+_srcroot() { cd "$startdir/.."; }
+
+check() {
+  _srcroot
+  node --test tests/js/
+  python3 -I -m unittest discover -s tests/py
+}
+
+package() {
+  _srcroot
+  local share="$pkgdir/usr/share/security-key-omarchy/plugin"
+  install -Dm644 -t "$share" manifest.json *.qml *.js
+  install -Dm755 -t "$share" key-helper
+  install -Dm644 -t "$share/i18n" i18n/*.json
+  install -Dm755 -t "$pkgdir/usr/bin" bin/omarchy-security-key
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}
