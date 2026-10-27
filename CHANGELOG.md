@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-10-27)
 
 - The three sections are tabs now (*FIDO2*, *OpenPGP*, *SSH*), one shown at
   a time, with the card keeping the height of the tallest. Ctrl+Tab and

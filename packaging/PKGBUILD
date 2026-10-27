@@ -4,7 +4,7 @@
 # $startdir), so `makepkg` in packaging/ packages the working tree as is.
 
 pkgname=security-key-omarchy
-pkgver=0.2.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc='Register a FIDO2 security key for sudo and polkit and import its OpenPGP and SSH keys, from an omarchy-shell overlay'
 arch=(any)

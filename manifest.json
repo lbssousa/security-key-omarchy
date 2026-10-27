@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "lbssousa.security-key",
   "name": "Security Key",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "Laércio de Sousa",
   "license": "MIT",
   "description": "Register a FIDO2 security key (YubiKey…) for sudo and polkit, import its OpenPGP key and its resident SSH keys, from a keyboard-friendly overlay styled like the polkit agent.",
