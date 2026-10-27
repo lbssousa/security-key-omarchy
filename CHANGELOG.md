@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-10-27)
 
 - When sudo and polkit read a shared authfile that
   [omarchy-multiuser](https://github.com/lbssousa/omarchy-multiuser)
