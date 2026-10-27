@@ -75,7 +75,7 @@ class SessionTest(unittest.TestCase):
         (self.pam / "sudo").write_text("auth sufficient pam_u2f.so cue\nauth include system-auth\n")
         (self.pam / "polkit-1").write_text("auth include system-auth\n")
         self.paths = helper.Paths(home=str(self.home), config=str(self.home / ".config"),
-                                  pam_dirs=[str(self.pam)], runtime=str(root))
+                                  pam_dirs=[str(self.pam)], runtime=str(root), shared_helper="")
         self.runner = FakeRunner()
         self.events = []
         self.session = helper.Session(self.runner, self.events.append, self.paths, "ada", "/askpass")
@@ -231,6 +231,60 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(self.authfile().read_text(), "bob:B,p,es256,+presence\n")
         self.run_op(self.session.fido_remove(5))
         self.assertEqual(self.last("error")["code"], "generic")
+
+    # -- FIDO2, shared authfile (omarchy-multiuser) ----------------------
+
+    def shared(self):
+        """sudo pinned to a shared authfile, with omarchy-multiuser's helper there."""
+        shared = pathlib.Path(self.tmp.name) / "fido2"
+        shared.write_text("bob:B,p,es256,+presence\nada:%s:%s\n" % (CRED1, CRED2))
+        (self.pam / "sudo").write_text("auth sufficient pam_u2f.so cue authfile=%s\n" % shared)
+        self.paths.shared_helper = "/usr/bin/omarchy-mu-fido2-authfile"
+        self.registered()
+        return shared
+
+    def test_shared_store_without_its_helper_stays_on_the_own_list(self):
+        self.shared()
+        self.paths.shared_helper = ""
+        self.run_op(self.session.refresh())
+        self.assertEqual(self.last("state")["authfile"], self.paths.authfile)
+        self.assertEqual(self.last("state")["credentials"], [])
+
+    def test_shared_store_lists_the_users_keys_there(self):
+        shared = self.shared()
+        self.run_op(self.session.refresh())
+        state = self.last("state")
+        self.assertEqual(state["authfile"], str(shared))
+        self.assertEqual([c["handle"] for c in state["credentials"]], ["HANDLEONE111", "HANDLETWO222"])
+
+    def test_shared_register_goes_through_pkexec(self):
+        self.shared()
+        self.runner.answers[("pamu2fcfg", "-u")] = helper.Result(0, "ada:%s\n" % CRED1)
+        self.run_op(self.session.fido_register(""))
+        args, stdin, _, _ = self.runner.ran("pkexec")[0]
+        self.assertEqual(args, ["pkexec", "/usr/bin/omarchy-mu-fido2-authfile", "add"])
+        self.assertEqual(stdin, "ada:%s\n" % CRED1)
+        self.assertIn({"type": "busy", "op": "fido.register", "stage": "auth"}, self.events)
+        self.assertEqual(self.last("done")["op"], "fido.register")
+        self.assertFalse(self.authfile().exists())
+
+    def test_shared_remove_sends_the_key_handle(self):
+        self.shared()
+        self.run_op(self.session.fido_remove(1))
+        args, stdin, _, _ = self.runner.ran("pkexec")[0]
+        self.assertEqual((args[2], stdin), ("remove-key", "HANDLETWO222\n"))
+        self.assertEqual(self.last("done")["op"], "fido.remove")
+
+    def test_shared_write_refused_or_failed(self):
+        shared = self.shared()
+        self.runner.answers[("pamu2fcfg", "-u")] = helper.Result(0, "ada:%s\n" % CRED1)
+        self.runner.answers[("pkexec", "/usr/bin/omarchy-mu-fido2-authfile")] = helper.Result(126, "", "dismissed")
+        self.run_op(self.session.fido_register(""))
+        self.assertEqual(self.last("error"), {"type": "error", "op": "fido.register",
+                                              "code": "not-authorized", "detail": str(shared)})
+        self.runner.answers[("pkexec", "/usr/bin/omarchy-mu-fido2-authfile")] = helper.Result(1, "", "lock")
+        self.run_op(self.session.fido_remove(0))
+        self.assertEqual(self.last("error")["code"], "write-failed")
 
     # -- OpenPGP ---------------------------------------------------------
 

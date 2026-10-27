@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- When sudo and polkit read a shared authfile that
+  [omarchy-multiuser](https://github.com/lbssousa/omarchy-multiuser)
+  manages (`/etc/fido2/fido2`), the overlay lists the keys on your line
+  there and registers and removes them through `pkexec
+  omarchy-mu-fido2-authfile` (your own password, in the polkit agent),
+  instead of only warning that PAM doesn't read your own list.
+
 ## 0.1.0 (2026-10-27)
 
 - First release: the `lbssousa.security-key` overlay, after the security-key

@@ -14,7 +14,9 @@ Three sections, each shown only when the key plugged in can do it:
   polkit with `pamu2fcfg`, asking for its PIN when it has one, and lists the
   keys registered for you, each with its own remove button. Keys go to your
   own `~/.config/Yubico/u2f_keys` (pam_u2f's per-user default), so no sudo is
-  needed.
+  needed, or to your line of the shared authfile that
+  [omarchy-multiuser](https://github.com/lbssousa/omarchy-multiuser)
+  manages (see below).
 - **OpenPGP key on the card** (keys with an OpenPGP applet): shows the
   holder, fingerprint and whether gpg knows the key; imports the public key
   from the URL stored on the card (or the keyservers), links it to the card
@@ -70,9 +72,16 @@ handing the PIN over a socket in a private folder of `$XDG_RUNTIME_DIR`.
 The overlay registers keys in your `~/.config/Yubico/u2f_keys`. sudo and
 polkit read that file when their `pam_u2f.so` line has no `authfile=`
 option. Omarchy's own `omarchy-setup-security-fido2` pins one shared file,
-`/etc/fido2/fido2`, instead; the overlay then says so (and how many of your
-keys that file holds), and an administrator has to switch the PAM lines to
-per-user lists, for instance:
+`/etc/fido2/fido2`, instead.
+
+With omarchy-multiuser installed, that shared file is where the overlay
+lists and saves your keys: it runs `pkexec omarchy-mu-fido2-authfile add`
+(or `remove-key`, with the key's handle) and the polkit agent asks for your
+own password. The helper only ever touches your own line.
+
+Without it, the overlay says the file is shared (and how many of your keys
+it holds), and an administrator has to switch the PAM lines to per-user
+lists, for instance:
 
 ```
 auth sufficient pam_u2f.so cue openasuser

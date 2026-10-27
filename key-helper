@@ -7,6 +7,11 @@ same tools a terminal would use (fido2-token, pamu2fcfg, gpg, ssh-keygen),
 as the user, without privileges. PINs live in memory for the one command
 that needs them and are never logged.
 
+Keys go to the user's own pam_u2f list, or, when sudo and polkit read a
+shared authfile that omarchy-multiuser manages (Omarchy's /etc/fido2/fido2),
+to the user's line there, through `pkexec omarchy-mu-fido2-authfile`: the
+polkit agent asks for the user's own password.
+
 Commands:
   {"cmd":"refresh"}
   {"cmd":"fido.register","pin":"…"}
@@ -26,7 +31,8 @@ Events:
    "card":null|{"vendor","serial","holder","url","fingerprints"},
    "keyState":"none"|"missing"|"public"|"ready","trusted",
    "sshKeys":[…]}
-  {"type":"busy","op","stage"}          (stage "touch" while waiting for a touch)
+  {"type":"busy","op","stage"}          (stage "touch" while waiting for a touch,
+                                          "auth" while polkit asks for the password)
   {"type":"done","op",…}               (fido.register, fido.remove, gpg.import,
                                           gpg.trust, gpg.remove, ssh.import with
                                           "imported"/"skipped", ssh.remove with "name")
@@ -53,8 +59,13 @@ TOUCH_TIMEOUT_S = 60
 GPG_TIMEOUT_S = 30
 NETWORK_TIMEOUT_S = 45
 PROBE_TIMEOUT_S = 10
+AUTH_TIMEOUT_S = 120
 POLL_S = 2
 ASKPASS_ENV = "SECURITY_KEY_ASKPASS_SOCKET"
+# omarchy-multiuser's helper for the shared authfile, and pkexec's exit
+# codes for a dismissed or refused authentication.
+SHARED_HELPER = "omarchy-mu-fido2-authfile"
+PKEXEC_REFUSED = (126, 127)
 
 # libfido2's error names, as pamu2fcfg and ssh-keygen print them, to the
 # codes the overlay explains.
@@ -272,12 +283,14 @@ class Runner:
 
 
 class Paths:
-    def __init__(self, home=None, config=None, pam_dirs=None, runtime=None):
+    def __init__(self, home=None, config=None, pam_dirs=None, runtime=None, shared_helper=None):
         self.home = home or os.path.expanduser("~")
         # pam_u2f's default authfile: $XDG_CONFIG_HOME/Yubico/u2f_keys, else ~/.config.
         self.config = config or os.environ.get("XDG_CONFIG_HOME") or os.path.join(self.home, ".config")
         self.pam_dirs = pam_dirs or ["/etc/pam.d", "/usr/lib/pam.d"]
         self.runtime = runtime or os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+        # An absolute path: pkexec matches it against the polkit action's.
+        self.shared_helper = shared_helper if shared_helper is not None else (shutil.which(SHARED_HELPER) or "")
 
     @property
     def authfile(self):
@@ -426,9 +439,21 @@ class Session:
         secret = await self.runner.run(["gpg", "--list-secret-keys", "--with-colons", fpr], timeout=GPG_TIMEOUT_S)
         return ("ready" if secret.code == 0 and secret.out.strip() else "public"), trust == "u"
 
-    def read_credentials(self):
+    def shared_store(self, pam=None):
+        """The shared authfile keys go to through omarchy-multiuser's helper, or ""
+        for the user's own list: sudo or polkit pinned to another file, and the
+        helper there to write the user's line in it."""
+        if not self.paths.shared_helper:
+            return ""
+        for state in (pam or self.pam_state()).values():
+            path = state["authfile"]
+            if state["u2f"] and path and path != self.paths.authfile:
+                return path
+        return ""
+
+    def read_credentials(self, path=None):
         try:
-            with open(self.paths.authfile, encoding="utf-8") as f:
+            with open(path or self.paths.authfile, encoding="utf-8") as f:
                 lines = f.read().splitlines()
         except OSError:
             return [], []
@@ -473,13 +498,14 @@ class Session:
 
     async def emit_state(self):
         key_state, trusted = await self.key_state()
-        credentials, _ = self.read_credentials()
         pam = self.pam_state()
+        store = self.shared_store(pam)
+        credentials, _ = self.read_credentials(store)
         self.emit({
             "type": "state",
             "devices": self.devices,
             "credentials": [{"handle": c.split(",", 1)[0], "label": credential_label(c)} for c in credentials],
-            "authfile": self.paths.authfile,
+            "authfile": store or self.paths.authfile,
             "pam": pam,
             "sharedCount": self.shared_count(pam),
             "card": self.card,
@@ -516,6 +542,13 @@ class Session:
         if not new:
             self.fail(op, "generic", "pamu2fcfg")
             return
+        store = self.shared_store()
+        if store:
+            # The helper merges the line into the user's own and skips known keys.
+            if await self.write_shared(op, store, "add", ":".join([self.user] + new)):
+                self.emit({"type": "done", "op": op})
+                await self.emit_state()
+            return
         mine, others = self.read_credentials()
         if not self.write_credentials(merge_credentials(mine, new), others):
             self.fail(op, "write-failed", self.paths.authfile)
@@ -525,9 +558,15 @@ class Session:
 
     async def fido_remove(self, index):
         op = "fido.remove"
-        mine, others = self.read_credentials()
+        store = self.shared_store()
+        mine, others = self.read_credentials(store)
         if not 0 <= index < len(mine):
             self.fail(op, "generic", "no such key")
+            return
+        if store:
+            if await self.write_shared(op, store, "remove-key", mine[index].split(",", 1)[0]):
+                self.emit({"type": "done", "op": op})
+                await self.emit_state()
             return
         del mine[index]
         if not self.write_credentials(mine, others):
@@ -535,6 +574,19 @@ class Session:
             return
         self.emit({"type": "done", "op": op})
         await self.emit_state()
+
+    async def write_shared(self, op, store, action, line):
+        """Runs `pkexec omarchy-mu-fido2-authfile <action>` with <line> on its
+        stdin; reports the failure and returns False when it didn't go through."""
+        self.emit({"type": "busy", "op": op, "stage": "auth"})
+        result = await self.runner.run(["pkexec", self.paths.shared_helper, action], stdin=line + "\n",
+                                       timeout=AUTH_TIMEOUT_S)
+        if result.code == 0:
+            return True
+        log("%s %s failed:" % (SHARED_HELPER, action), last_line(result.err))
+        refused = result.err == "timeout" or result.code in PKEXEC_REFUSED
+        self.fail(op, "not-authorized" if refused else "write-failed", store)
+        return False
 
     def write_credentials(self, mine, others):
         """Rewrites the authfile with <user>'s line (dropped when empty), atomically, 0600."""

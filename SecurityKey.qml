@@ -240,6 +240,9 @@ Item {
       if (inDialog && m.stage === "touch") root.pinState = { text: tr.t("securityKey.touch"), tone: "info" }
       else if (m.stage === "touch") setStatus(section, tr.t("securityKey.touch"), "info")
       else if (m.stage === "fetch") setStatus(section, tr.t("securityKey.gpg.importing"), "info")
+      // polkit's own dialog asks for the password (the shared authfile).
+      else if (inDialog && m.stage === "auth") root.pinState = { text: tr.t("securityKey.working"), tone: "info" }
+      else if (m.stage === "auth") setStatus(section, tr.t("securityKey.working"), "info")
     } else if (m.type === "done") {
       if (m.op === "fido.register") setStatus("fido", tr.t("securityKey.fido.registered"), "success")
       else if (m.op === "fido.remove") setStatus("fido", tr.t("securityKey.fido.removed"), "info")

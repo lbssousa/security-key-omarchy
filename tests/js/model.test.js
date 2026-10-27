@@ -61,4 +61,5 @@ test("Alt+N counts the registered keys, then the SSH keys", () => {
   assert.equal(Model.removeId("ssh", "id_x"), "ssh:id_x")
   assert.equal(Model.removeId("gpg"), "gpg")
   assert.equal(Model.errorKey("secret-on-disk"), "securityKey.gpg.secretOnDisk")
+  assert.equal(Model.errorKey("not-authorized"), "securityKey.error.writeFailed")
 })

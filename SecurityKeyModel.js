@@ -62,6 +62,8 @@ var ERROR_KEYS = {
   "no-device": "securityKey.error.noDevice",
   "no-card": "securityKey.error.noDevice",
   "write-failed": "securityKey.error.writeFailed",
+  // pkexec dismissed, refused or left unanswered (the shared authfile).
+  "not-authorized": "securityKey.error.writeFailed",
   "import-failed": "securityKey.gpg.importFailed",
   "trust-failed": "securityKey.gpg.trustFailed",
   "secret-on-disk": "securityKey.gpg.secretOnDisk",
