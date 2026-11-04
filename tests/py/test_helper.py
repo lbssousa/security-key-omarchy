@@ -114,9 +114,11 @@ class SessionTest(unittest.TestCase):
 
     def test_pam_lines(self):
         self.assertEqual(helper.pam_u2f("auth sufficient pam_u2f.so cue authfile=/etc/fido2/fido2\n"),
-                         {"u2f": True, "authfile": "/etc/fido2/fido2"})
+                         {"u2f": True, "authfile": "/etc/fido2/fido2", "pin": False})
         self.assertEqual(helper.pam_u2f("#auth sufficient pam_u2f.so\nauth include system-auth\n"),
-                         {"u2f": False, "authfile": ""})
+                         {"u2f": False, "authfile": "", "pin": False})
+        self.assertTrue(helper.pam_u2f("auth sufficient pam_u2f.so cue pinverification=1 userpresence=1\n")["pin"])
+        self.assertFalse(helper.pam_u2f("auth sufficient pam_u2f.so cue pinverification=0\n")["pin"])
 
     def test_merge_skips_known_key_handles(self):
         self.assertEqual(helper.merge_credentials([CRED1], ["HANDLEONE111,other,es256,+presence", CRED2]),
@@ -267,6 +269,24 @@ class SessionTest(unittest.TestCase):
         self.run_op(self.session.fido_remove(0))
         self.assertEqual(self.authfile().read_text(), "")
         self.assertEqual(self.runner.ran("pkexec"), [])
+
+    def test_register_refuses_a_key_without_a_pin_when_pam_demands_one(self):
+        (self.pam / "sudo").write_text("auth sufficient pam_u2f.so cue pinverification=1\n")
+        self.runner.answers[("fido2-token", "-I")] = helper.Result(0, "options: up, noclientPin\n")
+        self.registered()
+        self.run_op(self.session.fido_register(""))
+        self.assertEqual(self.last("error")["code"], "no-pin")
+        self.assertEqual(self.runner.ran("pamu2fcfg"), [])
+        self.run_op(self.session.refresh())
+        self.assertTrue(self.last("state")["pinRequired"])
+
+    def test_register_takes_a_key_without_a_pin_when_pam_demands_none(self):
+        self.runner.answers[("fido2-token", "-I")] = helper.Result(0, "options: up, noclientPin\n")
+        self.registered()
+        self.runner.answers[("pamu2fcfg", "-u")] = helper.Result(0, "ada:%s\n" % CRED1)
+        self.run_op(self.session.fido_register(""))
+        self.assertEqual(self.last("done")["op"], "fido.register")
+        self.assertFalse(self.last("state")["pinRequired"])
 
     def test_register_failure_reports_the_code(self):
         self.registered()

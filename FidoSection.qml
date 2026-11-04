@@ -15,6 +15,8 @@ Section {
   property var device: null
   // Where a key would go: the helper's "target" (fido_target in key-helper).
   property var target: ({ kind: "own", path: "" })
+  property bool pinRequired: false
+  readonly property bool needsPin: Model.needsPin(fido.pinRequired, fido.device)
   property int sharedCount: 0
   property bool busy: false
   property bool running: false
@@ -31,13 +33,13 @@ Section {
   function t(key, fallback) { return fido.strings ? fido.strings.t(key, fallback) : (fallback || key) }
 
   function submit() {
-    if (fido.busy || !fido.device || !Model.canRegister(fido.target)) return
+    if (fido.busy || !fido.device || !Model.canRegister(fido.target) || fido.needsPin) return
     fido.registerRequested()
   }
 
   function notice() {
     var key = Model.targetNoticeKey(fido.target)
-    if (key === "") return ""
+    if (key === "") return fido.needsPin ? fido.t("securityKey.fido.needsPin") : ""
     var text = fido.t(key)
     return text.indexOf("%1") < 0 ? text
       : text.arg(Model.ltr(fido.target.path)).arg(Commons.I18n.formatNumber(Math.max(0, fido.sharedCount)))
@@ -118,7 +120,7 @@ Section {
   Flow {
     width: parent.width
     spacing: Style.spacing.controlGap
-    visible: !!fido.device && Model.canRegister(fido.target)
+    visible: !!fido.device && Model.canRegister(fido.target) && !fido.needsPin
 
     Button {
       id: registerButton

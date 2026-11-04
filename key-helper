@@ -30,6 +30,7 @@ Events:
   {"type":"state","devices":[{"path","name","rk","clientPin"}],
    "credentials":[{"handle","label","unused"}],
    "target":{"kind":"own"|"shared"|"no-pam"|"no-helper"|"other-file"|"mixed","path"},
+   "pinRequired",
    "sharedCount",
    "card":null|{"vendor","serial","holder","url","fingerprints"},
    "keyState":"none"|"missing"|"public"|"ready","trusted",
@@ -229,17 +230,19 @@ def merge_credentials(existing, new):
 
 
 def pam_u2f(text):
-    """Whether a PAM file uses pam_u2f, and the authfile it fixes ("" = pam_u2f's per-user default)."""
+    """Whether a PAM file uses pam_u2f, the authfile it fixes ("" = pam_u2f's
+    per-user default), and whether it demands the key's PIN."""
     for line in text.splitlines():
         line = line.strip()
         if line.startswith("#") or "pam_u2f.so" not in line:
             continue
         authfile = ""
-        for word in line.split():
+        words = line.split()
+        for word in words:
             if word.startswith("authfile="):
                 authfile = word[len("authfile="):]
-        return {"u2f": True, "authfile": authfile}
-    return {"u2f": False, "authfile": ""}
+        return {"u2f": True, "authfile": authfile, "pin": "pinverification=1" in words}
+    return {"u2f": False, "authfile": "", "pin": False}
 
 
 # -- the session ---------------------------------------------------------------
@@ -475,6 +478,10 @@ class Session:
             kind = "shared" if self.paths.shared_helper else "no-helper"
         return {"kind": kind, "path": path}
 
+    def pin_required(self, pam=None):
+        """Whether sudo or polkit only take a key with its PIN, so one without a PIN would never work."""
+        return any(s["u2f"] and s["pin"] for s in (pam or self.pam_state()).values())
+
     def shared_credentials(self, target):
         return self.read_credentials(target["path"])[0] if target["kind"] == "shared" else []
 
@@ -501,7 +508,7 @@ class Session:
                 with open(path, encoding="utf-8") as f:
                     state[name] = pam_u2f(f.read())
             except OSError:
-                state[name] = {"u2f": False, "authfile": ""}
+                state[name] = {"u2f": False, "authfile": "", "pin": False}
         return state
 
     def shared_count(self, target):
@@ -539,6 +546,7 @@ class Session:
             "devices": self.devices,
             "credentials": credentials,
             "target": target,
+            "pinRequired": self.pin_required(pam),
             "sharedCount": self.shared_count(target),
             "card": self.card,
             "keyState": key_state,
@@ -563,6 +571,9 @@ class Session:
         store = target["path"] if target["kind"] == "shared" else ""
         if target["kind"] not in ("own", "shared"):
             self.fail(op, "generic", "sudo and polkit wouldn't read this key (%s)" % target["kind"])
+            return
+        if self.pin_required() and not self.devices[0].get("clientPin"):
+            self.fail(op, "no-pin")
             return
         if await self.already_registered(self.read_credentials(store)[0]):
             self.fail(op, "already-registered")

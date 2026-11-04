@@ -92,6 +92,14 @@ the polkit agent asks you to authenticate. The helper only ever touches
 `/etc/fido2/fido2`, and in it your own line, the one of the user pkexec names.
 A plugin from the marketplace can't install that helper.
 
+What sudo and polkit ask for when you use a key is up to their `pam_u2f.so`
+line. To demand its PIN and a touch, add these options; the overlay then turns
+away a key that has no PIN, which could never sign in:
+
+```
+auth sufficient pam_u2f.so cue authfile=/etc/fido2/fido2 pinverification=1 userpresence=1
+```
+
 Registering the key plugged in a second time is refused: the overlay asks it,
 without a touch, whether it made one of your keys there.
 

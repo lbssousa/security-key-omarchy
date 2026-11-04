@@ -45,6 +45,7 @@ Item {
   property var devices: []
   property var credentials: []
   property var target: ({ kind: "own", path: "" })
+  property bool pinRequired: false
   property int sharedCount: 0
   property var card: null
   property string keyState: ""
@@ -255,6 +256,7 @@ Item {
       root.devices = list(m.devices)
       root.credentials = list(m.credentials)
       root.target = m.target || ({ kind: "no-pam", path: "" })
+      root.pinRequired = m.pinRequired === true
       root.sharedCount = m.sharedCount || 0
       root.card = m.card ? { vendor: m.card.vendor, serial: m.card.serial, holder: m.card.holder,
                              url: m.card.url, fingerprints: list(m.card.fingerprints) } : null
@@ -308,7 +310,7 @@ Item {
   function altKey(key) {
     if (!root.opened || !root.loaded || root.helperLost || root.busy || root.pinOp !== "") return false
     var has = function(name) { return root.tabs.indexOf(name) >= 0 }
-    if (key === Qt.Key_R && has("fido") && root.device !== null && Model.canRegister(root.target)) {
+    if (key === Qt.Key_R && has("fido") && root.device !== null && Model.canRegister(root.target) && !Model.needsPin(root.pinRequired, root.device)) {
       selectTab("fido")
       fidoSection.submit()
     } else if (key === Qt.Key_I && has("gpg") && gpgSection.canImport) {
@@ -609,6 +611,7 @@ Item {
                 credentials: root.credentials
                 device: root.device
                 target: root.target
+                pinRequired: root.pinRequired
                 sharedCount: root.sharedCount
                 busy: root.busy
                 running: Model.section(root.op) === "fido" && root.op !== "fido.remove" && root.pinOp === ""

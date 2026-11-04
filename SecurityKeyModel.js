@@ -31,6 +31,11 @@ var TARGET_NOTICES = {
   "mixed": "securityKey.fido.pam.mixed"
 }
 
+// sudo or polkit only take a key with its PIN, and the one plugged in has none.
+function needsPin(pinRequired, device) {
+  return !!pinRequired && !!device && device.clientPin !== true
+}
+
 // What to say about the target instead of offering to register, or "".
 function targetNoticeKey(target) {
   return (target && TARGET_NOTICES[target.kind]) || ""
@@ -69,6 +74,7 @@ var ERROR_KEYS = {
   "timeout": "securityKey.error.timeout",
   "no-device": "securityKey.error.noDevice",
   "no-card": "securityKey.error.noDevice",
+  "no-pin": "securityKey.fido.needsPin",
   "already-registered": "securityKey.fido.alreadyRegistered",
   "write-failed": "securityKey.error.writeFailed",
   // pkexec dismissed, refused or left unanswered (the shared authfile).
@@ -146,6 +152,7 @@ if (typeof module !== "undefined") {
     gpgVisible: gpgVisible,
     sshVisible: sshVisible,
     canRegister: canRegister,
+    needsPin: needsPin,
     targetNoticeKey: targetNoticeKey,
     hasActive: hasActive,
     formatFingerprint: formatFingerprint,
