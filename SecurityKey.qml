@@ -44,8 +44,7 @@ Item {
   property bool helperLost: false
   property var devices: []
   property var credentials: []
-  property string authfile: ""
-  property var pam: ({})
+  property var target: ({ kind: "own", path: "" })
   property int sharedCount: 0
   property var card: null
   property string keyState: ""
@@ -74,7 +73,6 @@ Item {
   property var status: ({ fido: null, gpg: null, ssh: null })
 
   readonly property var device: Model.device(root.devices)
-  readonly property var pamState: Model.pamState(root.pam, root.authfile)
   readonly property bool anything: root.device !== null || root.card !== null || root.credentials.length > 0
 
   property string fontFamily: Style.font.menuFamily
@@ -256,8 +254,7 @@ Item {
       root.loaded = true
       root.devices = list(m.devices)
       root.credentials = list(m.credentials)
-      root.authfile = String(m.authfile || "")
-      root.pam = m.pam || ({})
+      root.target = m.target || ({ kind: "no-pam", path: "" })
       root.sharedCount = m.sharedCount || 0
       root.card = m.card ? { vendor: m.card.vendor, serial: m.card.serial, holder: m.card.holder,
                              url: m.card.url, fingerprints: list(m.card.fingerprints) } : null
@@ -311,7 +308,7 @@ Item {
   function altKey(key) {
     if (!root.opened || !root.loaded || root.helperLost || root.busy || root.pinOp !== "") return false
     var has = function(name) { return root.tabs.indexOf(name) >= 0 }
-    if (key === Qt.Key_R && has("fido") && root.device !== null) {
+    if (key === Qt.Key_R && has("fido") && root.device !== null && Model.canRegister(root.target)) {
       selectTab("fido")
       fidoSection.submit()
     } else if (key === Qt.Key_I && has("gpg") && gpgSection.canImport) {
@@ -611,7 +608,7 @@ Item {
                 strings: tr
                 credentials: root.credentials
                 device: root.device
-                pam: root.pamState
+                target: root.target
                 sharedCount: root.sharedCount
                 busy: root.busy
                 running: Model.section(root.op) === "fido" && root.op !== "fido.remove" && root.pinOp === ""
@@ -737,7 +734,7 @@ Item {
           glyph: root.pinOp === "ssh.import" ? "󰣀" : "󰌆"
           title: root.pinOp === "ssh.import" ? tr.t("securityKey.ssh.title") : tr.t("securityKey.fido.title")
           actionText: root.pinOp === "ssh.import" ? tr.t("securityKey.ssh.import")
-            : root.credentials.length > 0 ? tr.t("securityKey.fido.registerAnother") : tr.t("securityKey.fido.register")
+            : Model.hasActive(root.credentials) ? tr.t("securityKey.fido.registerAnother") : tr.t("securityKey.fido.register")
           message: root.pinState.text
           tone: root.pinState.tone
           running: root.busy

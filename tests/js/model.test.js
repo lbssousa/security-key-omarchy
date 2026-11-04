@@ -18,16 +18,25 @@ test("sections show only what the key supports", () => {
   assert.equal(Model.sshVisible([]), false)
 })
 
-test("whether sudo and polkit read the per-user keys", () => {
-  const mine = "/home/ada/.config/Yubico/u2f_keys"
-  const perUser = { u2f: true, authfile: "" }
-  const none = { u2f: false, authfile: "" }
-  assert.deepEqual(Model.pamState({ sudo: perUser, polkit: perUser }, mine), { kind: "ok", path: "" })
-  assert.deepEqual(Model.pamState({ sudo: { u2f: true, authfile: mine }, polkit: none }, mine), { kind: "ok", path: "" })
-  assert.deepEqual(Model.pamState({ sudo: { u2f: true, authfile: "/etc/fido2/fido2" }, polkit: perUser }, mine),
-    { kind: "shared", path: "/etc/fido2/fido2" })
-  assert.deepEqual(Model.pamState({ sudo: none, polkit: none }, mine), { kind: "missing", path: "" })
-  assert.deepEqual(Model.pamState(null, mine), { kind: "missing", path: "" })
+test("registering is offered only where sudo and polkit read the key", () => {
+  for (const kind of ["own", "shared"]) {
+    assert.equal(Model.canRegister({ kind }), true)
+    assert.equal(Model.targetNoticeKey({ kind }), "")
+  }
+  for (const [kind, key] of [["no-pam", "missing"], ["no-helper", "noHelper"], ["other-file", "otherFile"], ["mixed", "mixed"]]) {
+    assert.equal(Model.canRegister({ kind }), false)
+    assert.equal(Model.targetNoticeKey({ kind }), "securityKey.fido.pam." + key)
+  }
+  assert.equal(Model.canRegister(null), false)
+  assert.equal(Model.targetNoticeKey(null), "")
+})
+
+test("only keys sudo and polkit read count as registered", () => {
+  assert.equal(Model.hasActive([{ unused: true }, { unused: false }]), true)
+  assert.equal(Model.hasActive([{ unused: true }]), false)
+  assert.equal(Model.hasActive([]), false)
+  assert.equal(Model.hasActive(null), false)
+  assert.equal(Model.errorKey("already-registered"), "securityKey.fido.alreadyRegistered")
 })
 
 test("fingerprints group like gpg prints them", () => {

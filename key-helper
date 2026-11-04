@@ -3,15 +3,16 @@
 
 The overlay runs this helper while it is open: one JSON command per line on
 stdin, one JSON event per line on stdout. Everything it does goes through the
-same tools a terminal would use (fido2-token, pamu2fcfg, gpg, ssh-keygen),
-as the user, without privileges. PINs live in memory for the one command
-that needs them and are never logged.
+same tools a terminal would use (fido2-token, fido2-assert, pamu2fcfg, gpg,
+ssh-keygen), as the user, without privileges. PINs live in memory for the one
+command that needs them and are never logged.
 
-Keys go to the user's own pam_u2f list, or, when sudo and polkit read a
-root-owned authfile (Omarchy's /etc/fido2/fido2) and this package's helper is
-installed, to the user's line there, through `pkexec
-omarchy-security-key-authfile`: the polkit agent asks for the user to
-authenticate.
+A key is only registered where sudo and polkit will read it: the user's own
+pam_u2f list, or the user's line of Omarchy's /etc/fido2/fido2, through this
+package's helper (`pkexec omarchy-security-key-authfile`: the polkit agent asks
+for the user to authenticate). Anywhere else, registering is refused, and
+"target" in the state says why. Keys left in the user's own list while nothing
+reads it are reported as "unused", so they can be removed.
 
 Commands:
   {"cmd":"refresh"}
@@ -27,8 +28,9 @@ Commands:
 
 Events:
   {"type":"state","devices":[{"path","name","rk","clientPin"}],
-   "credentials":[{"handle","label"}],"authfile",
-   "pam":{"sudo":{"u2f","authfile"},"polkit":{…}},"sharedCount",
+   "credentials":[{"handle","label","unused"}],
+   "target":{"kind":"own"|"shared"|"no-pam"|"no-helper"|"other-file"|"mixed","path"},
+   "sharedCount",
    "card":null|{"vendor","serial","holder","url","fingerprints"},
    "keyState":"none"|"missing"|"public"|"ready","trusted",
    "sshKeys":[…]}
@@ -47,6 +49,7 @@ socket, prints it and exits.
 """
 
 import asyncio
+import base64
 import json
 import os
 import re
@@ -63,9 +66,10 @@ PROBE_TIMEOUT_S = 10
 AUTH_TIMEOUT_S = 120
 POLL_S = 2
 ASKPASS_ENV = "SECURITY_KEY_ASKPASS_SOCKET"
-# This package's helper for a root-owned authfile, and pkexec's exit
-# codes for a dismissed or refused authentication.
+# This package's helper for a root-owned authfile, the one file it writes, and
+# pkexec's exit codes for a dismissed or refused authentication.
 SHARED_HELPER = "omarchy-security-key-authfile"
+SHARED_AUTHFILE = "/etc/fido2/fido2"
 PKEXEC_REFUSED = (126, 127)
 
 # libfido2's error names, as pamu2fcfg and ssh-keygen print them, to the
@@ -212,7 +216,8 @@ def credential_label(credential):
 
 
 def merge_credentials(existing, new):
-    """Appends credentials not registered yet (same key handle = same key)."""
+    """Appends credentials not on the list yet, by key handle. A key registered
+    twice gets a new handle each time: Session.already_registered() catches that."""
     merged = list(existing)
     handles = {c.split(",", 1)[0] for c in existing}
     for credential in new:
@@ -284,7 +289,8 @@ class Runner:
 
 
 class Paths:
-    def __init__(self, home=None, config=None, pam_dirs=None, runtime=None, shared_helper=None):
+    def __init__(self, home=None, config=None, pam_dirs=None, runtime=None, shared_helper=None,
+                 shared_authfile=SHARED_AUTHFILE):
         self.home = home or os.path.expanduser("~")
         # pam_u2f's default authfile: $XDG_CONFIG_HOME/Yubico/u2f_keys, else ~/.config.
         self.config = config or os.environ.get("XDG_CONFIG_HOME") or os.path.join(self.home, ".config")
@@ -292,6 +298,7 @@ class Paths:
         self.runtime = runtime or os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
         # An absolute path: pkexec matches it against the polkit action's.
         self.shared_helper = shared_helper if shared_helper is not None else (shutil.which(SHARED_HELPER) or "")
+        self.shared_authfile = shared_authfile
 
     @property
     def authfile(self):
@@ -440,17 +447,36 @@ class Session:
         secret = await self.runner.run(["gpg", "--list-secret-keys", "--with-colons", fpr], timeout=GPG_TIMEOUT_S)
         return ("ready" if secret.code == 0 and secret.out.strip() else "public"), trust == "u"
 
-    def shared_store(self, pam=None):
-        """The root-owned authfile keys go to through this package's helper, or ""
-        for the user's own list: sudo or polkit pinned to another file, and the
-        helper there to write the user's line in it."""
-        if not self.paths.shared_helper:
-            return ""
-        for state in (pam or self.pam_state()).values():
-            path = state["authfile"]
-            if state["u2f"] and path and path != self.paths.authfile:
-                return path
-        return ""
+    def pam_paths(self, pam):
+        """The files the services that use pam_u2f read keys from."""
+        own = os.path.normpath(self.paths.authfile)
+        return {os.path.normpath(s["authfile"]) if s["authfile"] else own for s in pam.values() if s["u2f"]}
+
+    def fido_target(self, pam=None):
+        """Where a key registered now would go, and whether sudo and polkit would read it:
+          own         the user's own list, which they read
+          shared      the user's line of SHARED_AUTHFILE, through this package's helper
+          no-pam      neither asks for a key (Omarchy's setup turns that on, and registers one)
+          no-helper   they read SHARED_AUTHFILE, without the helper here to write to it
+          other-file  they read a file the helper doesn't write
+          mixed       they read different files, so a key would only work for one
+        """
+        paths = self.pam_paths(pam or self.pam_state())
+        if not paths:
+            return {"kind": "no-pam", "path": ""}
+        if len(paths) > 1:
+            return {"kind": "mixed", "path": ""}
+        path = paths.pop()
+        if path == os.path.normpath(self.paths.authfile):
+            kind = "own"
+        elif path != self.paths.shared_authfile:
+            kind = "other-file"
+        else:
+            kind = "shared" if self.paths.shared_helper else "no-helper"
+        return {"kind": kind, "path": path}
+
+    def shared_credentials(self, target):
+        return self.read_credentials(target["path"])[0] if target["kind"] == "shared" else []
 
     def read_credentials(self, path=None):
         try:
@@ -478,17 +504,16 @@ class Session:
                 state[name] = {"u2f": False, "authfile": ""}
         return state
 
-    def shared_count(self, pam):
-        """How many of the user's keys a fixed, shared authfile (Omarchy's /etc/fido2/fido2) holds."""
-        for state in pam.values():
-            path = state["authfile"]
-            if state["u2f"] and path and path != self.paths.authfile:
-                try:
-                    with open(path, encoding="utf-8") as f:
-                        return sum(len(credential_handles(line, self.user)) for line in f.read().splitlines())
-                except OSError:
-                    return -1
-        return 0
+    def shared_count(self, target):
+        """How many of the user's keys the file sudo and polkit read holds, when
+        it isn't the user's own list."""
+        if target["kind"] not in ("shared", "no-helper", "other-file"):
+            return 0
+        try:
+            with open(target["path"], encoding="utf-8") as f:
+                return sum(len(credential_handles(line, self.user)) for line in f.read().splitlines())
+        except OSError:
+            return -1
 
     def ssh_keys(self):
         try:
@@ -500,15 +525,21 @@ class Session:
     async def emit_state(self):
         key_state, trusted = await self.key_state()
         pam = self.pam_state()
-        store = self.shared_store(pam)
-        credentials, _ = self.read_credentials(store)
+        target = self.fido_target(pam)
+        own_unused = os.path.normpath(self.paths.authfile) not in self.pam_paths(pam)
+
+        def entry(credential, unused):
+            return {"handle": credential.split(",", 1)[0], "label": credential_label(credential), "unused": unused}
+
+        # The order fido_remove() counts in.
+        credentials = [entry(c, False) for c in self.shared_credentials(target)]
+        credentials += [entry(c, own_unused) for c in self.read_credentials()[0]]
         self.emit({
             "type": "state",
             "devices": self.devices,
-            "credentials": [{"handle": c.split(",", 1)[0], "label": credential_label(c)} for c in credentials],
-            "authfile": store or self.paths.authfile,
-            "pam": pam,
-            "sharedCount": self.shared_count(pam),
+            "credentials": credentials,
+            "target": target,
+            "sharedCount": self.shared_count(target),
             "card": self.card,
             "keyState": key_state,
             "trusted": trusted,
@@ -528,6 +559,14 @@ class Session:
         if not self.devices:
             self.fail(op, "no-device")
             return
+        target = self.fido_target()
+        store = target["path"] if target["kind"] == "shared" else ""
+        if target["kind"] not in ("own", "shared"):
+            self.fail(op, "generic", "sudo and polkit wouldn't read this key (%s)" % target["kind"])
+            return
+        if await self.already_registered(self.read_credentials(store)[0]):
+            self.fail(op, "already-registered")
+            return
         self.emit({"type": "busy", "op": op, "stage": "touch"})
         # Without a terminal pamu2fcfg reads the PIN from stdin.
         result = await self.runner.run(["pamu2fcfg", "-u", self.user], stdin=(pin + "\n") if pin else None,
@@ -543,7 +582,6 @@ class Session:
         if not new:
             self.fail(op, "generic", "pamu2fcfg")
             return
-        store = self.shared_store()
         if store:
             # The helper merges the line into the user's own and skips known keys.
             if await self.write_shared(op, store, "add", ":".join([self.user] + new)):
@@ -557,17 +595,33 @@ class Session:
         self.emit({"type": "done", "op": op})
         await self.emit_state()
 
+    async def already_registered(self, credentials):
+        """Whether the key plugged in made one of <credentials>. A credential only
+        answers on its own key, and up=false asks for no touch. Anything else
+        (another origin, a key that refuses to answer) just isn't a match."""
+        origin = "pam://" + socket.gethostname()
+        for credential in credentials:
+            challenge = base64.b64encode(os.urandom(32)).decode()
+            result = await self.runner.run(["fido2-assert", "-G", "-t", "up=false", self.devices[0]["path"]],
+                                           stdin="%s\n%s\n%s\n" % (challenge, origin, credential.split(",", 1)[0]),
+                                           timeout=PROBE_TIMEOUT_S)
+            if result.code == 0:
+                return True
+        return False
+
     async def fido_remove(self, index):
         op = "fido.remove"
-        store = self.shared_store()
-        mine, others = self.read_credentials(store)
-        if not 0 <= index < len(mine):
-            self.fail(op, "generic", "no such key")
-            return
-        if store:
-            if await self.write_shared(op, store, "remove-key", mine[index].split(",", 1)[0]):
+        target = self.fido_target()
+        shared = self.shared_credentials(target)
+        if 0 <= index < len(shared):
+            if await self.write_shared(op, target["path"], "remove-key", shared[index].split(",", 1)[0]):
                 self.emit({"type": "done", "op": op})
                 await self.emit_state()
+            return
+        mine, others = self.read_credentials()
+        index -= len(shared)
+        if not 0 <= index < len(mine):
+            self.fail(op, "generic", "no such key")
             return
         del mine[index]
         if not self.write_credentials(mine, others):

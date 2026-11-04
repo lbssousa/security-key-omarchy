@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- A key is only registered where sudo and polkit will read it. Without the
+  package's helper for `/etc/fido2/fido2`, with PAM pinned to any other file,
+  with sudo and polkit on different files, or with neither asking for a key,
+  the overlay offers no register button and says why, instead of saving a key
+  to `~/.config/Yubico/u2f_keys` that nothing reads.
+- The overlay no longer lists keys from one file and saves them to another
+  when PAM is pinned to a file other than `/etc/fido2/fido2`, the only one the
+  helper writes.
+- Registering the key plugged in a second time is refused without asking for a
+  touch (`fido2-assert`, with `up=false`). Before, it added a second credential
+  of the same key.
+- Keys left in `~/.config/Yubico/u2f_keys` that sudo and polkit no longer read
+  are listed as not used and can be removed.
+
 ## 0.4.0 (2026-11-03)
 
 - The Arch package now installs `omarchy-security-key-authfile` and its polkit

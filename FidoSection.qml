@@ -4,8 +4,8 @@ import qs.Commons as Commons
 import qs.Ui
 import "SecurityKeyModel.js" as Model
 
-// FIDO2/U2F for sudo and polkit: the keys registered in the user's own
-// pam_u2f list and the button that registers the key plugged in.
+// FIDO2/U2F for sudo and polkit: the keys registered for the user and, where
+// sudo and polkit will read them, the button that registers the key plugged in.
 // SecurityKey.qml runs the commands, asking for the PIN first (PinDialog).
 Section {
   id: fido
@@ -13,8 +13,8 @@ Section {
   property var strings: null
   property var credentials: []
   property var device: null
-  // SecurityKeyModel.pamState(): kind "ok", "shared" or "missing".
-  property var pam: ({ kind: "ok", path: "" })
+  // Where a key would go: the helper's "target" (fido_target in key-helper).
+  property var target: ({ kind: "own", path: "" })
   property int sharedCount: 0
   property bool busy: false
   property bool running: false
@@ -31,8 +31,16 @@ Section {
   function t(key, fallback) { return fido.strings ? fido.strings.t(key, fallback) : (fallback || key) }
 
   function submit() {
-    if (fido.busy || !fido.device) return
+    if (fido.busy || !fido.device || !Model.canRegister(fido.target)) return
     fido.registerRequested()
+  }
+
+  function notice() {
+    var key = Model.targetNoticeKey(fido.target)
+    if (key === "") return ""
+    var text = fido.t(key)
+    return text.indexOf("%1") < 0 ? text
+      : text.arg(Model.ltr(fido.target.path)).arg(Commons.I18n.formatNumber(Math.max(0, fido.sharedCount)))
   }
 
   // Back to the register button once the PIN dialog closes.
@@ -52,7 +60,7 @@ Section {
 
   Text {
     width: parent.width
-    visible: fido.credentials.length === 0
+    visible: fido.credentials.length === 0 && fido.sharedCount === 0
     textFormat: Text.PlainText
     text: fido.t("securityKey.fido.none")
     color: fido.foreground
@@ -78,7 +86,8 @@ Section {
         anchors.rightMargin: Style.spacing.lg
         anchors.verticalCenter: parent.verticalCenter
         textFormat: Text.PlainText
-        text: "󰌋  " + fido.t("securityKey.fido.credential", "Key %1").arg(Model.ltr(modelData.label + "…"))
+        text: "󰌋  " + (modelData.unused ? fido.t("securityKey.fido.credentialUnused", "Key %1 (not used by sudo or polkit)")
+                                         : fido.t("securityKey.fido.credential", "Key %1")).arg(Model.ltr(modelData.label + "…"))
         horizontalAlignment: Text.AlignLeft
         color: fido.foreground
         font.family: fido.fontFamily
@@ -109,7 +118,7 @@ Section {
   Flow {
     width: parent.width
     spacing: Style.spacing.controlGap
-    visible: !!fido.device
+    visible: !!fido.device && Model.canRegister(fido.target)
 
     Button {
       id: registerButton
@@ -118,7 +127,7 @@ Section {
       bordered: true
       enabled: !fido.busy
       iconText: "󰌆"
-      text: Model.shortcut(fido.credentials.length > 0 ? fido.t("securityKey.fido.registerAnother") : fido.t("securityKey.fido.register"), "Alt+R")
+      text: Model.shortcut(Model.hasActive(fido.credentials) ? fido.t("securityKey.fido.registerAnother") : fido.t("securityKey.fido.register"), "Alt+R")
       foreground: fido.foreground
       accent: fido.accent
       fontFamily: fido.fontFamily
@@ -159,11 +168,9 @@ Section {
 
   Text {
     width: parent.width
-    visible: fido.pam.kind !== "ok"
+    visible: text !== ""
     textFormat: Text.PlainText
-    text: fido.pam.kind === "shared"
-      ? fido.t("securityKey.fido.pam.shared", "sudo and polkit read keys from %1 (yours there: %2), not from your own list: an administrator has to switch pam_u2f to per-user lists before the keys registered here work there.").arg(Model.ltr(fido.pam.path)).arg(Commons.I18n.formatNumber(Math.max(0, fido.sharedCount)))
-      : fido.t("securityKey.fido.pam.missing")
+    text: fido.notice()
     wrapMode: Text.Wrap
     horizontalAlignment: Text.AlignLeft
     color: fido.foreground
