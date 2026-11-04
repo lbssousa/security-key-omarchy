@@ -86,7 +86,7 @@ do_add() {
     IFS=':' read -r -a new_creds <<<"$creds"
     for cred in "${new_creds[@]}"; do
       [[ -n $cred ]] || continue
-      # Same key registered again: keep one copy.
+      # Same credential sent again: keep one copy.
       if [[ ":${line#"$user:"}:" != *":$cred:"* ]]; then
         line+=":$cred"
       fi

@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import socket
 import stat
 import tempfile
 import unittest
@@ -45,6 +46,7 @@ class FakeRunner:
             ("gpg", "--card-status"): helper.Result(0, CARD),
             ("gpg", "--list-keys"): helper.Result(0, PUBLIC),
             ("gpg", "--list-secret-keys"): helper.Result(0, "sec:u:255\n"),
+            ("fido2-assert", "-G"): helper.Result(1, "", "FIDO_ERR_NO_CREDENTIALS"),
         }
         self.cancelled = False
         self.hook = None
@@ -143,9 +145,8 @@ class SessionTest(unittest.TestCase):
         state = self.last("state")
         self.assertEqual(state["devices"][0]["name"], "Yubico YubiKey OTP+FIDO+CCID")
         self.assertTrue(state["devices"][0]["rk"])
-        self.assertEqual(state["credentials"], [{"handle": "HANDLEONE111", "label": "HANDLEONE1"}])
-        self.assertEqual(state["pam"]["sudo"], {"u2f": True, "authfile": ""})
-        self.assertFalse(state["pam"]["polkit"]["u2f"])
+        self.assertEqual(state["credentials"], [{"handle": "HANDLEONE111", "label": "HANDLEONE1", "unused": False}])
+        self.assertEqual(state["target"]["kind"], "own")
         self.assertEqual(state["card"]["serial"], "20373235")
         self.assertEqual((state["keyState"], state["trusted"]), ("ready", True))
         self.assertEqual(state["sshKeys"], ["id_ed25519_sk_rk"])
@@ -207,6 +208,66 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(self.authfile().read_text(), "bob:B,p,es256,+presence\nada:%s:%s\n" % (CRED1, CRED2))
         self.assertEqual(len(self.last("state")["credentials"]), 2)
 
+    def test_register_refuses_the_same_key_without_a_touch(self):
+        self.authfile().parent.mkdir(parents=True)
+        self.authfile().write_text("ada:%s:%s\n" % (CRED1, CRED2))
+        self.registered()
+        self.runner.answers[("fido2-assert", "-G")] = helper.Result(0, "assertion")
+        self.run_op(self.session.fido_register(""))
+        self.assertEqual(self.last("error")["code"], "already-registered")
+        self.assertEqual(self.runner.ran("pamu2fcfg"), [])
+        args, stdin, _, _ = self.runner.ran("fido2-assert")[0]
+        self.assertEqual(args, ["fido2-assert", "-G", "-t", "up=false", "/dev/hidraw1"])
+        self.assertEqual(stdin.splitlines()[1:], ["pam://" + socket.gethostname(), "HANDLEONE111"])
+
+    def test_register_tries_every_credential_of_the_key(self):
+        self.authfile().parent.mkdir(parents=True)
+        self.authfile().write_text("ada:%s:%s\n" % (CRED1, CRED2))
+        self.registered()
+        self.runner.answers[("pamu2fcfg", "-u")] = helper.Result(0, "ada:NEWKEY333,p,es256,+presence\n")
+        self.run_op(self.session.fido_register(""))
+        self.assertEqual(len(self.runner.ran("fido2-assert")), 2)
+        self.assertEqual(self.last("done")["op"], "fido.register")
+
+    def assert_register_refused(self, kind):
+        self.registered()
+        self.assertEqual(self.session.fido_target()["kind"], kind)
+        self.run_op(self.session.fido_register(""))
+        self.assertEqual(self.last("error")["code"], "generic")
+        self.assertEqual(self.runner.ran("pamu2fcfg"), [])
+        self.assertEqual(self.runner.ran("pkexec"), [])
+        self.assertFalse(self.authfile().exists())
+
+    def test_register_refused_when_no_service_asks_for_a_key(self):
+        (self.pam / "sudo").write_text("auth include system-auth\n")
+        self.assert_register_refused("no-pam")
+
+    def test_register_refused_without_the_helper(self):
+        (self.pam / "sudo").write_text("auth sufficient pam_u2f.so cue authfile=/etc/fido2/fido2\n")
+        self.assert_register_refused("no-helper")
+
+    def test_register_refused_for_a_file_the_helper_does_not_write(self):
+        (self.pam / "sudo").write_text("auth sufficient pam_u2f.so cue authfile=/etc/elsewhere\n")
+        self.paths.shared_helper = "/usr/bin/omarchy-security-key-authfile"
+        self.assert_register_refused("other-file")
+        self.assertEqual(self.session.fido_target()["path"], "/etc/elsewhere")
+
+    def test_register_refused_when_the_services_read_different_files(self):
+        (self.pam / "polkit-1").write_text("auth sufficient pam_u2f.so cue authfile=/etc/fido2/fido2\n")
+        self.paths.shared_helper = "/usr/bin/omarchy-security-key-authfile"
+        self.assert_register_refused("mixed")
+
+    def test_old_keys_in_the_own_list_show_as_unused_and_can_go(self):
+        self.authfile().parent.mkdir(parents=True)
+        self.authfile().write_text("ada:%s\n" % CRED1)
+        (self.pam / "sudo").write_text("auth sufficient pam_u2f.so cue authfile=/etc/fido2/fido2\n")
+        self.run_op(self.session.refresh())
+        self.assertEqual(self.last("state")["credentials"],
+                         [{"handle": "HANDLEONE111", "label": "HANDLEONE1", "unused": True}])
+        self.run_op(self.session.fido_remove(0))
+        self.assertEqual(self.authfile().read_text(), "")
+        self.assertEqual(self.runner.ran("pkexec"), [])
+
     def test_register_failure_reports_the_code(self):
         self.registered()
         self.runner.answers[("pamu2fcfg", "-u")] = helper.Result(1, "", "error: fido_dev_make_cred (49) FIDO_ERR_PIN_INVALID\n")
@@ -240,22 +301,37 @@ class SessionTest(unittest.TestCase):
         shared.write_text("bob:B,p,es256,+presence\nada:%s:%s\n" % (CRED1, CRED2))
         (self.pam / "sudo").write_text("auth sufficient pam_u2f.so cue authfile=%s\n" % shared)
         self.paths.shared_helper = "/usr/bin/omarchy-security-key-authfile"
+        self.paths.shared_authfile = str(shared)
         self.registered()
         return shared
-
-    def test_shared_store_without_its_helper_stays_on_the_own_list(self):
-        self.shared()
-        self.paths.shared_helper = ""
-        self.run_op(self.session.refresh())
-        self.assertEqual(self.last("state")["authfile"], self.paths.authfile)
-        self.assertEqual(self.last("state")["credentials"], [])
 
     def test_shared_store_lists_the_users_keys_there(self):
         shared = self.shared()
         self.run_op(self.session.refresh())
         state = self.last("state")
-        self.assertEqual(state["authfile"], str(shared))
+        self.assertEqual(state["target"], {"kind": "shared", "path": str(shared)})
         self.assertEqual([c["handle"] for c in state["credentials"]], ["HANDLEONE111", "HANDLETWO222"])
+        self.assertEqual(state["sharedCount"], 2)
+
+    def test_shared_store_lists_old_own_keys_after_its_own(self):
+        self.shared()
+        self.authfile().parent.mkdir(parents=True)
+        self.authfile().write_text("ada:OLDKEY444,p,es256,+presence\n")
+        self.run_op(self.session.refresh())
+        self.assertEqual([(c["handle"], c["unused"]) for c in self.last("state")["credentials"]],
+                         [("HANDLEONE111", False), ("HANDLETWO222", False), ("OLDKEY444", True)])
+        self.run_op(self.session.fido_remove(2))
+        self.assertEqual(self.authfile().read_text(), "")
+        self.assertEqual(self.runner.ran("pkexec"), [])
+
+    def test_shared_register_checks_only_the_keys_there(self):
+        self.shared()
+        self.authfile().parent.mkdir(parents=True)
+        self.authfile().write_text("ada:OLDKEY444,p,es256,+presence\n")
+        self.runner.answers[("pamu2fcfg", "-u")] = helper.Result(0, "ada:NEWKEY333,p,es256,+presence\n")
+        self.run_op(self.session.fido_register(""))
+        handles = [c[1].splitlines()[2] for c in self.runner.ran("fido2-assert")]
+        self.assertEqual(handles, ["HANDLEONE111", "HANDLETWO222"])
 
     def test_shared_register_goes_through_pkexec(self):
         self.shared()

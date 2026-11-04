@@ -15,7 +15,8 @@ only when the key plugged in can do it:
   polkit with `pamu2fcfg`, asking for its PIN when it has one, and lists the
   keys registered for you, each with its own remove button. Keys go to your
   line of Omarchy's `/etc/fido2/fido2` through the package's helper, or to your
-  own `~/.config/Yubico/u2f_keys` when PAM reads that file (see below).
+  own `~/.config/Yubico/u2f_keys` when PAM reads that file, and nowhere else
+  (see below).
 - **OpenPGP key on the card** (keys with an OpenPGP applet): shows the
   holder, fingerprint and whether gpg knows the key; imports the public key
   from the URL stored on the card (or the keyservers), links it to the card
@@ -71,25 +72,32 @@ handing the PIN over a socket in a private folder of `$XDG_RUNTIME_DIR`.
 
 ### sudo and polkit
 
+The overlay only registers a key where sudo and polkit will read it, going by
+their `pam_u2f.so` lines. It doesn't change PAM itself.
+
+| sudo and polkit read keys from | Registering |
+|--------------------------------|-------------|
+| `/etc/fido2/fido2`, with the [Arch package](#as-an-arch-package) | Saves to your line there |
+| `/etc/fido2/fido2`, without the package | Refused: says to install the package |
+| `~/.config/Yubico/u2f_keys` (no `authfile=` option) | Saves there |
+| Any other file | Refused: an administrator has to register the key |
+| Different files | Refused: an administrator has to point them at the same file |
+| Nothing yet (neither asks for a key) | Refused: points to `omarchy-setup-security-fido2` |
+
 Omarchy's own `omarchy-setup-security-fido2` pins sudo and polkit to
-`/etc/fido2/fido2`, which belongs to root and takes one registration. With the
-[Arch package](#as-an-arch-package) installed, that file is where the overlay
-lists and saves your keys, several of them if you like: it runs `pkexec
+`/etc/fido2/fido2`, which belongs to root. That script writes one registration,
+but the file can hold several: the overlay runs `pkexec
 omarchy-security-key-authfile add` (or `remove-key`, with the key's handle) and
-the polkit agent asks you to authenticate. The helper only ever touches your
-own line, the one of the user pkexec names.
+the polkit agent asks you to authenticate. The helper only ever touches
+`/etc/fido2/fido2`, and in it your own line, the one of the user pkexec names.
+A plugin from the marketplace can't install that helper.
 
-A plugin from the marketplace can't install that helper. Without it, the
-overlay says the file is shared (and how many of your keys it holds), and
-registers keys in your `~/.config/Yubico/u2f_keys`. sudo and polkit only read
-that file when their `pam_u2f.so` line has no `authfile=` option, for instance:
+Registering the key plugged in a second time is refused: the overlay asks it,
+without a touch, whether it made one of your keys there.
 
-```
-auth sufficient pam_u2f.so cue openasuser
-```
-
-The overlay doesn't change PAM itself. When neither sudo nor polkit asks for
-a key yet, it points to `omarchy-setup-security-fido2`.
+Keys in `~/.config/Yubico/u2f_keys` that sudo and polkit no longer read, from
+before they were pinned to another file, are listed as not used, each with its
+remove button.
 
 ## Requirements
 

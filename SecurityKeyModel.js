@@ -18,20 +18,28 @@ function sshVisible(devices) {
   return false
 }
 
-// Whether sudo and polkit will read the keys this overlay registers:
-//   "ok"      pam_u2f reads the per-user file
-//   "shared"  pam_u2f is pinned to another authfile (Omarchy's /etc/fido2/fido2); path says which
-//   "missing" neither service asks for a security key
-function pamState(pam, authfile) {
-  var services = pam ? [pam.sudo, pam.polkit] : []
-  var any = false
-  for (var i = 0; i < services.length; i++) {
-    var s = services[i]
-    if (!s || !s.u2f) continue
-    any = true
-    if (s.authfile && s.authfile !== authfile) return { kind: "shared", path: s.authfile }
-  }
-  return { kind: any ? "ok" : "missing", path: "" }
+// Registering is only offered where sudo and polkit will read the key: the
+// helper's "target" is "own" or "shared" (see fido_target in key-helper).
+function canRegister(target) {
+  return !!target && (target.kind === "own" || target.kind === "shared")
+}
+
+var TARGET_NOTICES = {
+  "no-pam": "securityKey.fido.pam.missing",
+  "no-helper": "securityKey.fido.pam.noHelper",
+  "other-file": "securityKey.fido.pam.otherFile",
+  "mixed": "securityKey.fido.pam.mixed"
+}
+
+// What to say about the target instead of offering to register, or "".
+function targetNoticeKey(target) {
+  return (target && TARGET_NOTICES[target.kind]) || ""
+}
+
+// Whether a key is registered where sudo and polkit read it.
+function hasActive(credentials) {
+  for (var i = 0; credentials && i < credentials.length; i++) if (!credentials[i].unused) return true
+  return false
 }
 
 // Latin runs with slashes, tildes or plus signs (paths, file names, Alt+R)
@@ -61,6 +69,7 @@ var ERROR_KEYS = {
   "timeout": "securityKey.error.timeout",
   "no-device": "securityKey.error.noDevice",
   "no-card": "securityKey.error.noDevice",
+  "already-registered": "securityKey.fido.alreadyRegistered",
   "write-failed": "securityKey.error.writeFailed",
   // pkexec dismissed, refused or left unanswered (the shared authfile).
   "not-authorized": "securityKey.error.writeFailed",
@@ -136,7 +145,9 @@ if (typeof module !== "undefined") {
     device: device,
     gpgVisible: gpgVisible,
     sshVisible: sshVisible,
-    pamState: pamState,
+    canRegister: canRegister,
+    targetNoticeKey: targetNoticeKey,
+    hasActive: hasActive,
     formatFingerprint: formatFingerprint,
     errorKey: errorKey,
     section: section,
