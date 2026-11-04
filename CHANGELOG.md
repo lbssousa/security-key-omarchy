@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- When sudo or polkit demand the PIN (`pinverification=1` on `pam_u2f`), a key
+  without a PIN isn't registered, since it could never sign in: the overlay
+  says to set one first. The FIDO2 tab no longer promises sign-in with just a
+  touch.
 - A key is only registered where sudo and polkit will read it. Without the
   package's helper for `/etc/fido2/fido2`, with PAM pinned to any other file,
   with sudo and polkit on different files, or with neither asking for a key,

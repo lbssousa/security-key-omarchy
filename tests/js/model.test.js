@@ -31,6 +31,14 @@ test("registering is offered only where sudo and polkit read the key", () => {
   assert.equal(Model.targetNoticeKey(null), "")
 })
 
+test("a key without a PIN is turned away only where a PIN is demanded", () => {
+  assert.equal(Model.needsPin(true, { clientPin: false }), true)
+  assert.equal(Model.needsPin(true, { clientPin: true }), false)
+  assert.equal(Model.needsPin(false, { clientPin: false }), false)
+  assert.equal(Model.needsPin(true, null), false)
+  assert.equal(Model.errorKey("no-pin"), "securityKey.fido.needsPin")
+})
+
 test("only keys sudo and polkit read count as registered", () => {
   assert.equal(Model.hasActive([{ unused: true }, { unused: false }]), true)
   assert.equal(Model.hasActive([{ unused: true }]), false)
