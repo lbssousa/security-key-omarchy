@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 (2026-11-04)
 
 - When sudo or polkit demand the PIN (`pinverification=1` on `pam_u2f`), a key
   without a PIN isn't registered, since it could never sign in: the overlay
