@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  `pkexec omarchy-security-key-authfile`, for the overlay's FIDO2 section,
+  which has no root of its own. It asks for the user's own password or key:
+  the helper only touches the caller's line (PKEXEC_UID).
+-->
+<policyconfig>
+  <vendor>security-key-omarchy</vendor>
+  <vendor_url>https://github.com/lbssousa/security-key-omarchy</vendor_url>
+
+  <action id="org.omarchy.security-key.authfile">
+    <description>Register or remove your FIDO2 security keys</description>
+    <message>Authentication is required to save your security keys for sudo and polkit</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_self</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/omarchy-security-key-authfile</annotate>
+  </action>
+</policyconfig>

@@ -8,9 +8,10 @@ as the user, without privileges. PINs live in memory for the one command
 that needs them and are never logged.
 
 Keys go to the user's own pam_u2f list, or, when sudo and polkit read a
-shared authfile that omarchy-multiuser manages (Omarchy's /etc/fido2/fido2),
-to the user's line there, through `pkexec omarchy-mu-fido2-authfile`: the
-polkit agent asks for the user's own password.
+root-owned authfile (Omarchy's /etc/fido2/fido2) and this package's helper is
+installed, to the user's line there, through `pkexec
+omarchy-security-key-authfile`: the polkit agent asks for the user to
+authenticate.
 
 Commands:
   {"cmd":"refresh"}
@@ -62,9 +63,9 @@ PROBE_TIMEOUT_S = 10
 AUTH_TIMEOUT_S = 120
 POLL_S = 2
 ASKPASS_ENV = "SECURITY_KEY_ASKPASS_SOCKET"
-# omarchy-multiuser's helper for the shared authfile, and pkexec's exit
+# This package's helper for a root-owned authfile, and pkexec's exit
 # codes for a dismissed or refused authentication.
-SHARED_HELPER = "omarchy-mu-fido2-authfile"
+SHARED_HELPER = "omarchy-security-key-authfile"
 PKEXEC_REFUSED = (126, 127)
 
 # libfido2's error names, as pamu2fcfg and ssh-keygen print them, to the
@@ -440,7 +441,7 @@ class Session:
         return ("ready" if secret.code == 0 and secret.out.strip() else "public"), trust == "u"
 
     def shared_store(self, pam=None):
-        """The shared authfile keys go to through omarchy-multiuser's helper, or ""
+        """The root-owned authfile keys go to through this package's helper, or ""
         for the user's own list: sudo or polkit pinned to another file, and the
         helper there to write the user's line in it."""
         if not self.paths.shared_helper:
@@ -576,7 +577,7 @@ class Session:
         await self.emit_state()
 
     async def write_shared(self, op, store, action, line):
-        """Runs `pkexec omarchy-mu-fido2-authfile <action>` with <line> on its
+        """Runs `pkexec omarchy-security-key-authfile <action>` with <line> on its
         stdin; reports the failure and returns False when it didn't go through."""
         self.emit({"type": "busy", "op": op, "stage": "auth"})
         result = await self.runner.run(["pkexec", self.paths.shared_helper, action], stdin=line + "\n",
