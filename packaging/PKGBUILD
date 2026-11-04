@@ -4,14 +4,14 @@
 # $startdir), so `makepkg` in packaging/ packages the working tree as is.
 
 pkgname=security-key-omarchy
-pkgver=0.3.0
+pkgver=0.4.0
 pkgrel=1
 pkgdesc='Register a FIDO2 security key for sudo and polkit and import its OpenPGP and SSH keys, from an omarchy-shell overlay'
 arch=(any)
 url='https://github.com/lbssousa/security-key-omarchy'
 license=(MIT)
 depends=(omarchy python libfido2 pam-u2f gnupg openssh)
-checkdepends=(nodejs)
+checkdepends=(nodejs fakeroot)
 install=security-key-omarchy.install
 
 _srcroot() { cd "$startdir/.."; }
@@ -20,6 +20,7 @@ check() {
   _srcroot
   node --test tests/js/
   python3 -I -m unittest discover -s tests/py
+  tests/sh/authfile.test.sh
 }
 
 package() {
@@ -28,7 +29,8 @@ package() {
   install -Dm644 -t "$share" manifest.json *.qml *.js
   install -Dm755 -t "$share" key-helper
   install -Dm644 -t "$share/i18n" i18n/*.json
-  install -Dm755 -t "$pkgdir/usr/bin" bin/omarchy-security-key
+  install -Dm755 -t "$pkgdir/usr/bin" bin/omarchy-security-key bin/omarchy-security-key-authfile
+  install -Dm644 -t "$pkgdir/usr/share/polkit-1/actions" polkit/org.omarchy.security-key.authfile.policy
 
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"

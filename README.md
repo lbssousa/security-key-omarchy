@@ -14,10 +14,8 @@ only when the key plugged in can do it:
 - **Sign in with the key** (FIDO2/U2F): registers the key for sudo and
   polkit with `pamu2fcfg`, asking for its PIN when it has one, and lists the
   keys registered for you, each with its own remove button. Keys go to your
-  own `~/.config/Yubico/u2f_keys` (pam_u2f's per-user default), so no sudo is
-  needed, or to your line of the shared authfile that
-  [omarchy-multiuser](https://github.com/lbssousa/omarchy-multiuser)
-  manages (see below).
+  line of Omarchy's `/etc/fido2/fido2` through the package's helper, or to your
+  own `~/.config/Yubico/u2f_keys` when PAM reads that file (see below).
 - **OpenPGP key on the card** (keys with an OpenPGP applet): shows the
   holder, fingerprint and whether gpg knows the key; imports the public key
   from the URL stored on the card (or the keyservers), links it to the card
@@ -73,19 +71,18 @@ handing the PIN over a socket in a private folder of `$XDG_RUNTIME_DIR`.
 
 ### sudo and polkit
 
-The overlay registers keys in your `~/.config/Yubico/u2f_keys`. sudo and
-polkit read that file when their `pam_u2f.so` line has no `authfile=`
-option. Omarchy's own `omarchy-setup-security-fido2` pins one shared file,
-`/etc/fido2/fido2`, instead.
+Omarchy's own `omarchy-setup-security-fido2` pins sudo and polkit to
+`/etc/fido2/fido2`, which belongs to root and takes one registration. With the
+[Arch package](#as-an-arch-package) installed, that file is where the overlay
+lists and saves your keys, several of them if you like: it runs `pkexec
+omarchy-security-key-authfile add` (or `remove-key`, with the key's handle) and
+the polkit agent asks you to authenticate. The helper only ever touches your
+own line, the one of the user pkexec names.
 
-With omarchy-multiuser installed, that shared file is where the overlay
-lists and saves your keys: it runs `pkexec omarchy-mu-fido2-authfile add`
-(or `remove-key`, with the key's handle) and the polkit agent asks for your
-own password. The helper only ever touches your own line.
-
-Without it, the overlay says the file is shared (and how many of your keys
-it holds), and an administrator has to switch the PAM lines to per-user
-lists, for instance:
+A plugin from the marketplace can't install that helper. Without it, the
+overlay says the file is shared (and how many of your keys it holds), and
+registers keys in your `~/.config/Yubico/u2f_keys`. sudo and polkit only read
+that file when their `pam_u2f.so` line has no `authfile=` option, for instance:
 
 ```
 auth sufficient pam_u2f.so cue openasuser
@@ -120,16 +117,15 @@ add to `~/.config/omarchy/extensions/omarchy-menu.jsonc`:
 "setup.security.fido2": {"action":"omarchy-shell shell summon lbssousa.security-key '{}'"},
 ```
 
-[omarchy-multiuser](https://github.com/lbssousa/omarchy-multiuser)'s menu
-block does that already.
-
 Update with `omarchy plugin update lbssousa.security-key`.
 
 ### As an Arch package
 
 `packaging/` builds `security-key-omarchy`, which installs the plugin to
-`/usr/share/security-key-omarchy/plugin` and an `omarchy-security-key`
-command that opens it (or the terminal FIDO2 setup, when the plugin is off):
+`/usr/share/security-key-omarchy/plugin`, an `omarchy-security-key` command
+that opens it (or the terminal FIDO2 setup, when the plugin is off), and
+`omarchy-security-key-authfile` with its polkit action, which save your keys in
+`/etc/fido2/fido2`:
 
 ```sh
 cd packaging && makepkg -si
@@ -157,7 +153,7 @@ file), the OpenPGP key in your keyring and the SSH key files in `~/.ssh`.
 ## Development
 
 ```sh
-just test      # node tests (model, catalogs), python tests (helper), lint, validation
+just test      # node tests (model, catalogs), python and shell tests (helpers), lint, validation
 just dev       # the overlay in its own Quickshell instance, on the real key
 just dev ar    # ... in Arabic (right to left)
 just link      # this checkout's plugin in the real shell

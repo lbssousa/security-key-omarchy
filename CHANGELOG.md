@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0 (2026-11-03)
+
+- The Arch package now installs `omarchy-security-key-authfile` and its polkit
+  action (`org.omarchy.security-key.authfile`), so the overlay registers and
+  removes keys in Omarchy's `/etc/fido2/fido2` without omarchy-multiuser. It
+  takes the place of `omarchy-mu-fido2-authfile`, keeping its checks: only the
+  caller's line, from `PKEXEC_UID`, with no `--user` and no `sudo` route.
+- `omarchy-security-key` falls back to Omarchy's own terminal setup.
+
 ## 0.3.0 (2026-10-27)
 
 - The three sections are tabs now (*FIDO2*, *OpenPGP*, *SSH*), one shown at

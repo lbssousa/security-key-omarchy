@@ -14,6 +14,4 @@ fi
 echo "The security key plugin isn't enabled in the shell; enable it with:" >&2
 echo "  omarchy-shell shell rescanPlugins" >&2
 echo "  omarchy-shell shell enablePlugin lbssousa.security-key '{}'" >&2
-fallback=omarchy-setup-security-fido2
-command -v omarchy-mu-setup-security-fido2 >/dev/null && fallback=omarchy-mu-setup-security-fido2
-exec omarchy-launch-floating-terminal-with-presentation "$fallback"
+exec omarchy-launch-floating-terminal-with-presentation omarchy-setup-security-fido2

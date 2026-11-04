@@ -5,9 +5,9 @@ plugin_link := env("HOME") / ".config/omarchy/plugins/lbssousa.security-key"
 default:
     @just --list
 
-# Every test: the overlay's JS model and catalogs, the helper, QML lint,
+# Every test: the overlay's JS model and catalogs, both helpers, QML lint,
 # and the shell's own plugin validation.
-test: test-js test-py lint validate
+test: test-js test-py test-sh lint validate
 
 test-js:
     node --test tests/js/
@@ -16,12 +16,16 @@ test-js:
 test-py:
     python3 -I -m unittest discover -s tests/py
 
+# The authfile helper under fakeroot, against a fake /etc/fido2.
+test-sh:
+    tests/sh/authfile.test.sh
+
 # qmllint over the plugin (warnings only: the shell's qs.* modules aren't
 # importable outside it) and shellcheck when installed.
 lint:
     #!/usr/bin/env bash
     set -uo pipefail
-    if command -v shellcheck >/dev/null; then shellcheck bin/*; fi
+    if command -v shellcheck >/dev/null; then shellcheck bin/* tests/sh/*; fi
     /usr/lib/qt6/bin/qmllint -I /usr/lib/qt6/qml *.qml || true
 
 # What `omarchy plugin add` and the plugin marketplace check: the manifest,
