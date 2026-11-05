@@ -231,18 +231,27 @@ def merge_credentials(existing, new):
 
 def pam_u2f(text):
     """Whether a PAM file uses pam_u2f, the authfile it fixes ("" = pam_u2f's
-    per-user default), and whether it demands the key's PIN."""
+    per-user default), whether it demands the key's PIN, and the origin and
+    appid it checks credentials against ("" = pam_u2f's defaults)."""
     for line in text.splitlines():
         line = line.strip()
         if line.startswith("#") or "pam_u2f.so" not in line:
             continue
-        authfile = ""
+        found = {"authfile": "", "origin": "", "appid": ""}
         words = line.split()
         for word in words:
-            if word.startswith("authfile="):
-                authfile = word[len("authfile="):]
-        return {"u2f": True, "authfile": authfile, "pin": "pinverification=1" in words}
-    return {"u2f": False, "authfile": "", "pin": False}
+            name, sep, value = word.partition("=")
+            if sep and name in found:
+                found[name] = value
+        return dict(found, u2f=True, pin="pinverification=1" in words)
+    return {"u2f": False, "authfile": "", "pin": False, "origin": "", "appid": ""}
+
+
+def relying_party(service):
+    """The origin and appid a pam_u2f line checks: pam://<hostname> and the
+    origin by default, as pamu2fcfg and pam_u2f both assume."""
+    origin = service.get("origin") or "pam://" + socket.gethostname()
+    return origin, service.get("appid") or origin
 
 
 # -- the session ---------------------------------------------------------------
@@ -464,10 +473,12 @@ class Session:
           other-file  they read a file the helper doesn't write
           mixed       they read different files, so a key would only work for one
         """
-        paths = self.pam_paths(pam or self.pam_state())
+        pam = pam or self.pam_state()
+        paths = self.pam_paths(pam)
         if not paths:
             return {"kind": "no-pam", "path": ""}
-        if len(paths) > 1:
+        # A key made for one origin doesn't sign in where another is checked.
+        if len(paths) > 1 or len(self.relying_parties(pam)) > 1:
             return {"kind": "mixed", "path": ""}
         path = paths.pop()
         if path == os.path.normpath(self.paths.authfile):
@@ -477,6 +488,10 @@ class Session:
         else:
             kind = "shared" if self.paths.shared_helper else "no-helper"
         return {"kind": kind, "path": path}
+
+    def relying_parties(self, pam):
+        """The (origin, appid) pairs the services that use pam_u2f check."""
+        return {relying_party(s) for s in pam.values() if s["u2f"]}
 
     def pin_required(self, pam=None):
         """Whether sudo or polkit only take a key with its PIN, so one without a PIN would never work."""
@@ -502,13 +517,15 @@ class Session:
 
     def pam_state(self):
         state = {}
-        for service, name in (("sudo", "sudo"), ("polkit-1", "polkit")):
+        # omarchy-lock-fido2 is the lock screen's key service, when one is set up
+        # (omarchy-yubikey's lock plugin): a key it can't read wouldn't unlock.
+        for service, name in (("sudo", "sudo"), ("polkit-1", "polkit"), ("omarchy-lock-fido2", "lock")):
             path = self.paths.pam_file(service)
             try:
                 with open(path, encoding="utf-8") as f:
                     state[name] = pam_u2f(f.read())
             except OSError:
-                state[name] = {"u2f": False, "authfile": "", "pin": False}
+                state[name] = pam_u2f("")
         return state
 
     def shared_count(self, target):
@@ -575,13 +592,15 @@ class Session:
         if self.pin_required() and not self.devices[0].get("clientPin"):
             self.fail(op, "no-pin")
             return
-        if await self.already_registered(self.read_credentials(store)[0]):
+        # fido_target() checked that every service agrees on these.
+        origin, appid = self.relying_parties(self.pam_state()).pop()
+        if await self.already_registered(self.read_credentials(store)[0], origin):
             self.fail(op, "already-registered")
             return
         self.emit({"type": "busy", "op": op, "stage": "touch"})
         # Without a terminal pamu2fcfg reads the PIN from stdin.
-        result = await self.runner.run(["pamu2fcfg", "-u", self.user], stdin=(pin + "\n") if pin else None,
-                                       timeout=TOUCH_TIMEOUT_S)
+        result = await self.runner.run(["pamu2fcfg", "-u", self.user, "-o", origin, "-i", appid],
+                                       stdin=(pin + "\n") if pin else None, timeout=TOUCH_TIMEOUT_S)
         if result.code != 0:
             code = "timeout" if result.err == "timeout" else fido_error(result.err, pin)
             log("pamu2fcfg failed:", last_line(result.err))
@@ -606,11 +625,11 @@ class Session:
         self.emit({"type": "done", "op": op})
         await self.emit_state()
 
-    async def already_registered(self, credentials):
-        """Whether the key plugged in made one of <credentials>. A credential only
-        answers on its own key, and up=false asks for no touch. Anything else
-        (another origin, a key that refuses to answer) just isn't a match."""
-        origin = "pam://" + socket.gethostname()
+    async def already_registered(self, credentials, origin):
+        """Whether the key plugged in made one of <credentials> for <origin>. A
+        credential only answers on its own key, and up=false asks for no touch.
+        Anything else (another origin, a key that refuses to answer) just isn't
+        a match."""
         for credential in credentials:
             challenge = base64.b64encode(os.urandom(32)).decode()
             result = await self.runner.run(["fido2-assert", "-G", "-t", "up=false", self.devices[0]["path"]],

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Keys are registered for the origin and appid that sudo and polkit check
+  (`origin=`/`appid=` on `pam_u2f.so`, else `pam://<host name>`). Before, the
+  overlay always used the host name, so with a setup that pins its own, such as
+  omarchy-yubikey's `pam://omarchy`, a new key was saved but never signed in,
+  and a key already registered there wasn't recognized.
+- Services that check different origins, or a lock screen key service
+  (`omarchy-lock-fido2`) that reads another file, are refused as "mixed".
+
 ## 0.5.0 (2026-11-04)
 
 - When sudo or polkit demand the PIN (`pinverification=1` on `pam_u2f`), a key

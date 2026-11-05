@@ -100,6 +100,15 @@ away a key that has no PIN, which could never sign in:
 auth sufficient pam_u2f.so cue authfile=/etc/fido2/fido2 pinverification=1 userpresence=1
 ```
 
+A key is registered for the origin and appid PAM checks: the `origin=` and
+`appid=` options of the `pam_u2f.so` lines, or pam_u2f's default
+(`pam://` and the host name). Setups that pin their own, such as
+[omarchy-yubikey](https://github.com/marselnenaj/omarchy-yubikey)
+(`origin=pam://omarchy`), get keys that work with them, and a lock screen that
+asks for a key (`/etc/pam.d/omarchy-lock-fido2`) has to agree with sudo and
+polkit too: services that check different origins or files are refused like
+any other mismatch.
+
 Registering the key plugged in a second time is refused: the overlay asks it,
 without a touch, whether it made one of your keys there.
 

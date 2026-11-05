@@ -114,9 +114,14 @@ class SessionTest(unittest.TestCase):
 
     def test_pam_lines(self):
         self.assertEqual(helper.pam_u2f("auth sufficient pam_u2f.so cue authfile=/etc/fido2/fido2\n"),
-                         {"u2f": True, "authfile": "/etc/fido2/fido2", "pin": False})
+                         {"u2f": True, "authfile": "/etc/fido2/fido2", "pin": False, "origin": "", "appid": ""})
         self.assertEqual(helper.pam_u2f("#auth sufficient pam_u2f.so\nauth include system-auth\n"),
-                         {"u2f": False, "authfile": "", "pin": False})
+                         {"u2f": False, "authfile": "", "pin": False, "origin": "", "appid": ""})
+        line = helper.pam_u2f("auth sufficient pam_u2f.so cue origin=pam://omarchy appid=pam://omarchy-app\n")
+        self.assertEqual((line["origin"], line["appid"]), ("pam://omarchy", "pam://omarchy-app"))
+        host = "pam://" + socket.gethostname()
+        self.assertEqual(helper.relying_party(helper.pam_u2f("auth sufficient pam_u2f.so\n")), (host, host))
+        self.assertEqual(helper.relying_party({"origin": "pam://omarchy", "appid": ""}), ("pam://omarchy", "pam://omarchy"))
         self.assertTrue(helper.pam_u2f("auth sufficient pam_u2f.so cue pinverification=1 userpresence=1\n")["pin"])
         self.assertFalse(helper.pam_u2f("auth sufficient pam_u2f.so cue pinverification=0\n")["pin"])
 
@@ -193,7 +198,8 @@ class SessionTest(unittest.TestCase):
         self.runner.answers[("pamu2fcfg", "-u")] = helper.Result(0, "ada:%s\n" % CRED1)
         self.run_op(self.session.fido_register("1234"))
         args, stdin, _, _ = self.runner.ran("pamu2fcfg")[0]
-        self.assertEqual((args, stdin), (["pamu2fcfg", "-u", "ada"], "1234\n"))
+        host = "pam://" + socket.gethostname()
+        self.assertEqual((args, stdin), (["pamu2fcfg", "-u", "ada", "-o", host, "-i", host], "1234\n"))
         self.assertEqual(self.events[0], {"type": "busy", "op": "fido.register", "stage": "touch"})
         self.assertEqual(self.last("done")["op"], "fido.register")
         self.assertEqual(self.authfile().read_text(), "ada:%s\n" % CRED1)
@@ -207,6 +213,8 @@ class SessionTest(unittest.TestCase):
         self.runner.answers[("pamu2fcfg", "-u")] = helper.Result(0, "ada:%s\n" % CRED2)
         self.run_op(self.session.fido_register(""))
         self.assertIsNone(self.runner.ran("pamu2fcfg")[0][1])
+        host = "pam://" + socket.gethostname()
+        self.assertEqual(self.runner.ran("pamu2fcfg")[0][0], ["pamu2fcfg", "-u", "ada", "-o", host, "-i", host])
         self.assertEqual(self.authfile().read_text(), "bob:B,p,es256,+presence\nada:%s:%s\n" % (CRED1, CRED2))
         self.assertEqual(len(self.last("state")["credentials"]), 2)
 
@@ -230,6 +238,30 @@ class SessionTest(unittest.TestCase):
         self.run_op(self.session.fido_register(""))
         self.assertEqual(len(self.runner.ran("fido2-assert")), 2)
         self.assertEqual(self.last("done")["op"], "fido.register")
+
+    def test_register_uses_the_origin_pam_checks(self):
+        # omarchy-yubikey's setup pins its own relying party for every service.
+        line = "auth sufficient pam_u2f.so cue origin=pam://omarchy appid=pam://omarchy\n"
+        (self.pam / "sudo").write_text(line)
+        (self.pam / "omarchy-lock-fido2").write_text(line)
+        self.authfile().parent.mkdir(parents=True)
+        self.authfile().write_text("ada:%s\n" % CRED1)
+        self.registered()
+        self.runner.answers[("pamu2fcfg", "-u")] = helper.Result(0, "ada:%s\n" % CRED2)
+        self.run_op(self.session.fido_register(""))
+        self.assertEqual(self.runner.ran("pamu2fcfg")[0][0],
+                         ["pamu2fcfg", "-u", "ada", "-o", "pam://omarchy", "-i", "pam://omarchy"])
+        _, stdin, _, _ = self.runner.ran("fido2-assert")[0]
+        self.assertEqual(stdin.splitlines()[1], "pam://omarchy")
+        self.assertEqual(self.last("done")["op"], "fido.register")
+
+    def test_register_refused_when_the_services_check_different_origins(self):
+        (self.pam / "polkit-1").write_text("auth sufficient pam_u2f.so cue origin=pam://omarchy appid=pam://omarchy\n")
+        self.assert_register_refused("mixed")
+
+    def test_register_refused_when_the_lock_reads_another_file(self):
+        (self.pam / "omarchy-lock-fido2").write_text("auth required pam_u2f.so authfile=/etc/elsewhere\n")
+        self.assert_register_refused("mixed")
 
     def assert_register_refused(self, kind):
         self.registered()
