@@ -187,7 +187,7 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(state["card"]["serial"], "20373235")
         self.assertEqual((state["keyState"], state["trusted"]), ("ready", True))
         self.assertEqual(state["sshKeys"], [{"name": "id_ed25519_sk_rk", "application": "", "host": "",
-                                             "hostState": ""}])
+                                             "hostState": "", "persistMinutes": 0}])
         self.assertEqual(len(state["sshDefaults"]["user"]), 16)
         self.assertEqual(state["sshDefaults"]["comment"].split("@")[0], "ada")
         self.assertEqual(state["sharedCount"], 0)
@@ -742,7 +742,9 @@ class SessionTest(unittest.TestCase):
         drop_in = ssh / "config.d" / "github.com.conf"
         self.assertEqual(drop_in.read_text().splitlines()[1:], [
             "Host github.com", "    User git", "    IdentityFile ~/.ssh/" + name,
-            "    IdentitiesOnly yes", "    IdentityAgent none"])
+            "    IdentitiesOnly yes", "    IdentityAgent none",
+            # No connection reuse unless asked for, and none inherited either.
+            "    ControlMaster no", "    ControlPath none", "    ControlPersist no"])
         self.assertEqual(stat.S_IMODE(drop_in.stat().st_mode), 0o600)
         self.assertEqual((ssh / "config").read_text(),
                          "Include config.d/*.conf\n\nHost *\n    ServerAliveInterval 60\n")
@@ -754,6 +756,70 @@ class SessionTest(unittest.TestCase):
         # Removing the copy takes its line, and the drop-in with its last key.
         self.run_op(self.session.ssh_remove(name))
         self.assertFalse(drop_in.exists())
+
+    def test_connection_reuse_per_host(self):
+        name, other = "id_ed25519_sk_rk_github.com_work", "id_ed25519_sk_rk_github.com_home"
+        ssh = self.ssh_key(name, "ssh:github.com")
+        self.ssh_key(other, "ssh:github.com", credential=b"HOME" * 16)
+        self.registered()
+        self.run_op(self.session.ssh_host(name, True))
+        self.assertEqual(self.session.ssh_entries()[1]["persistMinutes"], 0)
+        drop_in = ssh / "config.d" / "github.com.conf"
+        self.run_op(self.session.ssh_persist(name, 15))
+        self.assertEqual(self.last("done"), {"type": "done", "op": "ssh.persist", "name": name,
+                                             "host": "github.com", "minutes": 15})
+        lines = drop_in.read_text().splitlines()
+        self.assertEqual(lines[-3:], ["    ControlMaster auto", "    ControlPath ~/.ssh/security-key/control/%C",
+                                      "    ControlPersist 15m"])
+        control = ssh / "security-key" / "control"
+        self.assertEqual(stat.S_IMODE(control.stat().st_mode), 0o700)
+        # The host keeps its minutes when another key joins it, or one leaves.
+        self.run_op(self.session.ssh_host(other, True))
+        self.assertIn("    ControlPersist 15m", drop_in.read_text().splitlines())
+        self.assertEqual({e["persistMinutes"] for e in self.session.ssh_entries()}, {15})
+        self.run_op(self.session.ssh_host(other, False))
+        self.assertIn("    ControlPersist 15m", drop_in.read_text().splitlines())
+        # Back to authenticating each connection.
+        self.run_op(self.session.ssh_persist(name, 0))
+        self.assertEqual(drop_in.read_text().splitlines()[-3:],
+                         ["    ControlMaster no", "    ControlPath none", "    ControlPersist no"])
+        self.run_op(self.session.ssh_persist(name, 1440))
+        self.assertIn("    ControlPersist 1440m", drop_in.read_text().splitlines())
+
+    def test_connection_reuse_bounds_and_keys_without_a_host(self):
+        name = "id_ed25519_sk_rk_github.com"
+        self.ssh_key(name, "ssh:github.com")
+        self.registered()
+        for minutes in (-1, 1441, True, "15"):
+            self.events.clear()
+            self.run_op(self.session.ssh_persist(name, minutes))
+            self.assertEqual(self.last("error")["code"], "ssh-invalid", minutes)
+        # Only a key its host's drop-in already uses.
+        self.run_op(self.session.ssh_persist(name, 15))
+        self.assertEqual(self.last("error")["code"], "generic")
+        self.assertFalse((self.home / ".ssh" / "config.d").exists())
+        self.session.handle_line('{"cmd":"ssh.persist","name":"%s","minutes":"15"}' % name)
+        self.assertIsNone(self.session.op)
+
+    def test_a_drop_in_from_0_6_stays_ours(self):
+        # 0.6 wrote no Control lines: still the helper's, reported as no reuse,
+        # and rewritten with them on the next change.
+        name = "id_ed25519_sk_rk_github.com"
+        ssh = self.ssh_key(name, "ssh:github.com")
+        (ssh / "config").write_text(helper.SSH_INCLUDE + "\n")
+        (ssh / "config.d").mkdir()
+        legacy = helper.drop_in_text([name], ("git", "github.com", ""), None)
+        self.assertNotIn("Control", legacy)
+        (ssh / "config.d" / "github.com.conf").write_text(legacy)
+        self.registered()
+        self.assertEqual(self.session.ssh_entries()[0]["hostState"], "on")
+        self.assertEqual(self.session.ssh_entries()[0]["persistMinutes"], 0)
+        self.run_op(self.session.ssh_persist(name, 30))
+        self.assertIn("    ControlPersist 30m", (ssh / "config.d" / "github.com.conf").read_text().splitlines())
+        # A hand-edited duration is no longer the helper's.
+        text = (ssh / "config.d" / "github.com.conf").read_text().replace("30m", "2h")
+        (ssh / "config.d" / "github.com.conf").write_text(text)
+        self.assertEqual(self.session.ssh_entries()[0]["hostState"], "edited")
 
     def test_host_drop_ins_never_take_over_other_files(self):
         name = "id_ed25519_sk_rk_github.com"

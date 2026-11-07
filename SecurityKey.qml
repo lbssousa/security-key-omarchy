@@ -329,6 +329,12 @@ Item {
       else if (m.op === "ssh.delete") setStatus("ssh", tr.t("securityKey.ssh.deleted", "Deleted from the security key, with its copy: %1").arg(Model.ltr(String(m.name || ""))), "info")
       else if (m.op === "ssh.host") setStatus("ssh", (m.enabled ? tr.t("securityKey.ssh.hostEnabled", "ssh now uses this key for %1.")
                                                                 : tr.t("securityKey.ssh.hostDisabled", "ssh no longer uses this key for %1.")).arg(String(m.host || "")), "success")
+      else if (m.op === "ssh.persist") {
+        sshSection.persistEditing = ""
+        setStatus("ssh", (m.minutes > 0 ? tr.t("securityKey.ssh.persistSet", "Connections to %1 are reused for %2 minutes.")
+                                          : tr.t("securityKey.ssh.persistNone", "Each new connection to %1 authenticates again."))
+                           .arg(String(m.host || "")).arg(Commons.I18n.formatNumber(m.minutes || 0)), "success")
+      }
       else if (m.op === "ssh.create") {
         root.sshCreating = false
         root.sshCreated = { name: String(m.name || ""), publicKey: String(m.publicKey || "") }
@@ -369,7 +375,8 @@ Item {
   // only while its button would, and shows its tab first. Returns whether
   // the key was one of them.
   function altKey(key) {
-    if (!root.opened || !root.loaded || root.helperLost || root.busy || root.pinOp !== "" || root.sshCreating) return false
+    if (!root.opened || !root.loaded || root.helperLost || root.busy || root.pinOp !== "" || root.sshCreating
+        || sshSection.persistEditing !== "") return false
     var has = function(name) { return root.tabs.indexOf(name) >= 0 }
     if (key === Qt.Key_R && has("fido") && root.device !== null && Model.canRegister(root.target) && !Model.needsPin(root.pinRequired, root.device)) {
       selectTab("fido")
@@ -451,6 +458,7 @@ Item {
           if (root.busy) root.cancel()
           else if (root.pendingRemove !== "") root.pendingRemove = ""
           else if (root.sshCreating) root.closeCreate()
+          else if (sshSection.persistEditing !== "") sshSection.persistEditing = ""
           else root.dismiss()
           event.accepted = true
         } else if (event.key === Qt.Key_F5) {
@@ -728,7 +736,7 @@ Item {
                 created: root.sshCreated
                 pending: root.pendingRemove
                 busy: root.busy
-                running: Model.section(root.op) === "ssh" && root.op !== "ssh.remove" && root.op !== "ssh.host" && root.pinOp === ""
+                running: Model.section(root.op) === "ssh" && ["ssh.remove", "ssh.host", "ssh.persist"].indexOf(root.op) < 0 && root.pinOp === ""
                 statusText: root.statusOf("ssh").text
                 statusTone: root.statusOf("ssh").tone
                 fontFamily: root.fontFamily
@@ -745,6 +753,7 @@ Item {
                   if (root.pendingRemove !== "") sshSection.focusDelete(name)
                 }
                 onHostRequested: function(name, enable) { root.run({ cmd: "ssh.host", name: name, enable: enable }) }
+                onPersistRequested: function(name, minutes) { root.run({ cmd: "ssh.persist", name: name, minutes: minutes }) }
                 onCancelRequested: root.cancel()
               }
             }

@@ -39,6 +39,7 @@ Section {
   signal removeRequested(string name)
   signal deleteRequested(string name)
   signal hostRequested(string name, bool enable)
+  signal persistRequested(string name, int minutes)
   signal cancelRequested()
 
   function t(key, fallback) { return ssh.strings ? ssh.strings.t(key, fallback) : (fallback || key) }
@@ -65,6 +66,16 @@ Section {
   function focusAction() {
     if (ssh.creating && createLoader.item) createLoader.item.focusFirst()
     else if (importButton.visible) importButton.forceActiveFocus()
+  }
+
+  // The key whose host's connection reuse is being changed, or "". Its
+  // number field exists only meanwhile (a text input watches the clipboard).
+  property string persistEditing: ""
+
+  function persistText(minutes) {
+    return minutes > 0
+      ? ssh.t("securityKey.ssh.persistOn", "Reuse connections: %1 min").arg(Commons.I18n.formatNumber(minutes))
+      : ssh.t("securityKey.ssh.persistOff", "Reuse connections: no")
   }
 
   // What the form holds, kept here: its text fields exist only while it is
@@ -217,6 +228,97 @@ Section {
             accent: ssh.accent
             fontFamily: ssh.fontFamily
             onClicked: ssh.hostRequested(row.modelData.name, row.modelData.hostState !== "on")
+          }
+
+          Button {
+            visible: row.modelData.hostState === "on"
+            focusable: true
+            bordered: true
+            enabled: !ssh.busy
+            iconText: "󰑓"
+            text: ssh.persistText(row.modelData.persistMinutes || 0)
+            selected: ssh.persistEditing === row.modelData.name
+            foreground: ssh.foreground
+            accent: ssh.accent
+            fontFamily: ssh.fontFamily
+            onClicked: ssh.persistEditing = ssh.persistEditing === row.modelData.name ? "" : row.modelData.name
+          }
+        }
+
+        // How long connections to the host are reused, as omarchy-yubikey
+        // offers it: whole minutes from 0 (the default) to 1440.
+        Loader {
+          width: parent.width
+          active: ssh.persistEditing === row.modelData.name && row.modelData.hostState === "on"
+          visible: active
+
+          sourceComponent: Component {
+            Column {
+              spacing: Style.spacing.sm
+
+              function minutes() {
+                var typed = parseInt(minutesField.field.contentItem.text, 10)
+                var value = isNaN(typed) ? minutesField.field.value : typed
+                return Math.max(0, Math.min(1440, value))
+              }
+
+              function apply() {
+                if (!ssh.busy) ssh.persistRequested(row.modelData.name, minutes())
+              }
+
+              NumberField {
+                id: minutesField
+                label: ssh.t("securityKey.ssh.persistLabel", "Reuse connections to %1 for (minutes)").arg(row.modelData.host)
+                from: 0
+                to: 1440
+                stepSize: 1
+                value: row.modelData.persistMinutes || 0
+                foreground: ssh.foreground
+                accent: ssh.accent
+                fontFamily: ssh.fontFamily
+                Component.onCompleted: Qt.callLater(function() { minutesField.field.forceActiveFocus() })
+                Keys.onReturnPressed: parent.apply()
+                Keys.onEnterPressed: parent.apply()
+              }
+
+              Text {
+                width: rowContent.width
+                textFormat: Text.PlainText
+                text: ssh.t("securityKey.ssh.persistHint")
+                wrapMode: Text.Wrap
+                color: ssh.foreground
+                opacity: 0.6
+                font.family: ssh.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              Flow {
+                width: rowContent.width
+                spacing: Style.spacing.controlGap
+
+                Button {
+                  focusable: true
+                  bordered: true
+                  enabled: !ssh.busy
+                  iconText: "󰄬"
+                  text: Model.shortcut(ssh.t("securityKey.ssh.apply"), "Enter")
+                  foreground: ssh.foreground
+                  accent: ssh.accent
+                  fontFamily: ssh.fontFamily
+                  onClicked: parent.parent.apply()
+                }
+
+                Button {
+                  focusable: true
+                  bordered: true
+                  text: Model.shortcut(ssh.t("securityKey.cancel"), "Esc")
+                  foreground: ssh.foreground
+                  accent: ssh.accent
+                  fontFamily: ssh.fontFamily
+                  onClicked: ssh.persistEditing = ""
+                }
+              }
+            }
           }
         }
 
