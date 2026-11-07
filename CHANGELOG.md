@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.1 (2026-11-07)
+
+- The PIN dialog and the new SSH key form create their text fields only while
+  they are open, and the public key just made is shown only while there is
+  one. A text input watches the clipboard for as long as it exists, shown or
+  not, and Qt reads each new clipboard offer for it. Before, these fields
+  lived with the shell for good, so another client's oversized or endless
+  clipboard offer could exhaust memory or block the shell. Found in the
+  Omarchy plugin marketplace's review.
+
 ## 0.6.0 (2026-11-07)
 
 Brought over from omarchy-yubikey, with the fixes its review asked for:

@@ -63,34 +63,41 @@ Section {
 
   // Back to the button the PIN dialog came from once it closes.
   function focusAction() {
-    if (ssh.creating) createForm.focusFirst()
+    if (ssh.creating && createLoader.item) createLoader.item.focusFirst()
     else if (importButton.visible) importButton.forceActiveFocus()
   }
 
+  // What the form holds, kept here: its text fields exist only while it is
+  // open (createLoader), since a text input watches the clipboard for as long
+  // as it exists, shown or not.
+  property string formAlgorithm: "ed25519-sk"
+  property string formApplication: ""
+  property string formUser: ""
+  property bool formVerify: true
+  property bool formTouch: true
+  property string formComment: ""
+
+  // The form, with fresh suggestions each time it opens.
   function openForm() {
     if (ssh.busy || !ssh.device) return
+    ssh.formAlgorithm = "ed25519-sk"
+    ssh.formApplication = ""
+    ssh.formUser = ssh.defaults.user || ""
+    ssh.formVerify = true
+    ssh.formTouch = true
+    ssh.formComment = ssh.defaults.comment || ""
     ssh.createOpened()
   }
 
-  // The form, with fresh suggestions each time it opens.
-  onCreatingChanged: {
-    if (!ssh.creating) return
-    algorithmGroup.value = "ed25519-sk"
-    applicationField.text = ""
-    userField.text = ssh.defaults.user || ""
-    verifyToggle.checked = true
-    touchToggle.checked = true
-    commentField.text = ssh.defaults.comment || ""
-    Qt.callLater(createForm.focusFirst)
-  }
+  onCreatingChanged: if (ssh.creating) Qt.callLater(function() { if (createLoader.item) createLoader.item.focusFirst() })
 
   readonly property var options: ({
-    algorithm: algorithmGroup.value,
-    application: applicationField.text.trim(),
-    user: userField.text.trim(),
-    verify: verifyToggle.checked,
-    touch: touchToggle.checked,
-    comment: commentField.text.trim()
+    algorithm: ssh.formAlgorithm,
+    application: ssh.formApplication.trim(),
+    user: ssh.formUser.trim(),
+    verify: ssh.formVerify,
+    touch: ssh.formTouch,
+    comment: ssh.formComment.trim()
   })
   readonly property string problem: Model.createProblem(ssh.options)
 
@@ -246,17 +253,24 @@ Section {
       font.pixelSize: Style.font.bodySmall
     }
 
-    TextEdit {
+    // Read-only, and created only while there is a key to show.
+    Loader {
       width: parent.width
-      readOnly: true
-      selectByMouse: true
-      textFormat: TextEdit.PlainText
-      text: ssh.created ? ssh.created.publicKey : ""
-      wrapMode: TextEdit.WrapAnywhere
-      color: ssh.foreground
-      selectionColor: ssh.accent
-      font.family: "monospace"
-      font.pixelSize: Style.font.caption
+      active: !ssh.creating && !!ssh.created
+
+      sourceComponent: Component {
+        TextEdit {
+          readOnly: true
+          selectByMouse: true
+          textFormat: TextEdit.PlainText
+          text: ssh.created ? ssh.created.publicKey : ""
+          wrapMode: TextEdit.WrapAnywhere
+          color: ssh.foreground
+          selectionColor: ssh.accent
+          font.family: "monospace"
+          font.pixelSize: Style.font.caption
+        }
+      }
     }
 
     Button {
@@ -273,196 +287,210 @@ Section {
 
   // -- a new key --------------------------------------------------------------
 
-  Column {
-    id: createForm
+  Loader {
+    id: createLoader
     width: parent.width
-    visible: ssh.creating
-    spacing: Style.spacing.sm
+    active: ssh.creating
+    visible: active
 
-    function focusFirst() { applicationField.forceActiveFocus() }
+    sourceComponent: Component {
+      Column {
+        id: createForm
+        width: createLoader.width
+        spacing: Style.spacing.sm
 
-    Text {
-      width: parent.width
-      textFormat: Text.PlainText
-      text: ssh.t("securityKey.ssh.createTitle")
-      color: ssh.foreground
-      font.family: ssh.fontFamily
-      font.pixelSize: Style.font.subtitle
-    }
+        function focusFirst() { applicationField.forceActiveFocus() }
 
-    Text {
-      width: parent.width
-      textFormat: Text.PlainText
-      text: ssh.t("securityKey.ssh.algorithm")
-      color: ssh.foreground
-      font.family: ssh.fontFamily
-      font.pixelSize: Style.font.bodySmall
-    }
-    ButtonGroup {
-      id: algorithmGroup
-      options: [{ value: "ed25519-sk", label: "ed25519-sk" }, { value: "ecdsa-sk", label: "ecdsa-sk" }]
-      value: "ed25519-sk"
-      foreground: ssh.foreground
-      accent: ssh.accent
-      fontFamily: ssh.fontFamily
-      onChanged: function(value) { algorithmGroup.value = value }
-    }
-    Text {
-      width: parent.width
-      textFormat: Text.PlainText
-      text: ssh.t("securityKey.ssh.algorithmHint")
-      wrapMode: Text.Wrap
-      color: ssh.foreground
-      opacity: 0.6
-      font.family: ssh.fontFamily
-      font.pixelSize: Style.font.caption
-    }
-    Text {
-      width: parent.width
-      textFormat: Text.PlainText
-      text: ssh.t("securityKey.ssh.application")
-      color: ssh.foreground
-      font.family: ssh.fontFamily
-      font.pixelSize: Style.font.bodySmall
-    }
-    TextField {
-      id: applicationField
-      width: parent.width
-      foreground: ssh.foreground
-      accent: ssh.accent
-      inputMethodHints: Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
-      placeholderText: "github.com"
-      maximumLength: 128
-      // Enter makes the key; Alt+key never reaches the text.
-      Keys.onPressed: function(event) {
-        if (event.modifiers & Qt.AltModifier) event.accepted = true
-      }
-      onAccepted: ssh.create()
-    }
-    Text {
-      width: parent.width
-      textFormat: Text.PlainText
-      text: ssh.t("securityKey.ssh.applicationHint")
-      wrapMode: Text.Wrap
-      color: ssh.foreground
-      opacity: 0.6
-      font.family: ssh.fontFamily
-      font.pixelSize: Style.font.caption
-    }
-    Text {
-      width: parent.width
-      textFormat: Text.PlainText
-      text: ssh.t("securityKey.ssh.user")
-      color: ssh.foreground
-      font.family: ssh.fontFamily
-      font.pixelSize: Style.font.bodySmall
-    }
-    TextField {
-      id: userField
-      width: parent.width
-      foreground: ssh.foreground
-      accent: ssh.accent
-      inputMethodHints: Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
-      maximumLength: 64
-      // Enter makes the key; Alt+key never reaches the text.
-      Keys.onPressed: function(event) {
-        if (event.modifiers & Qt.AltModifier) event.accepted = true
-      }
-      onAccepted: ssh.create()
-    }
-    Text {
-      width: parent.width
-      textFormat: Text.PlainText
-      text: ssh.t("securityKey.ssh.userHint")
-      wrapMode: Text.Wrap
-      color: ssh.foreground
-      opacity: 0.6
-      font.family: ssh.fontFamily
-      font.pixelSize: Style.font.caption
-    }
+        Text {
+          width: parent.width
+          textFormat: Text.PlainText
+          text: ssh.t("securityKey.ssh.createTitle")
+          color: ssh.foreground
+          font.family: ssh.fontFamily
+          font.pixelSize: Style.font.subtitle
+        }
 
-    Toggle {
-      id: verifyToggle
-      width: parent.width
-      label: ssh.t("securityKey.ssh.verify")
-      checked: true
-      foreground: ssh.foreground
-      accent: ssh.accent
-      fontFamily: ssh.fontFamily
-      onClicked: checked = !checked
-    }
+        Text {
+          width: parent.width
+          textFormat: Text.PlainText
+          text: ssh.t("securityKey.ssh.algorithm")
+          color: ssh.foreground
+          font.family: ssh.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+        ButtonGroup {
+          id: algorithmGroup
+          options: [{ value: "ed25519-sk", label: "ed25519-sk" }, { value: "ecdsa-sk", label: "ecdsa-sk" }]
+          value: ssh.formAlgorithm
+          foreground: ssh.foreground
+          accent: ssh.accent
+          fontFamily: ssh.fontFamily
+          onChanged: function(value) { ssh.formAlgorithm = value }
+        }
+        Text {
+          width: parent.width
+          textFormat: Text.PlainText
+          text: ssh.t("securityKey.ssh.algorithmHint")
+          wrapMode: Text.Wrap
+          color: ssh.foreground
+          opacity: 0.6
+          font.family: ssh.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+        Text {
+          width: parent.width
+          textFormat: Text.PlainText
+          text: ssh.t("securityKey.ssh.application")
+          color: ssh.foreground
+          font.family: ssh.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+        TextField {
+          id: applicationField
+          Component.onCompleted: text = ssh.formApplication
+          onTextChanged: ssh.formApplication = text
+          width: parent.width
+          foreground: ssh.foreground
+          accent: ssh.accent
+          inputMethodHints: Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
+          placeholderText: "github.com"
+          maximumLength: 128
+          // Enter makes the key; Alt+key never reaches the text.
+          Keys.onPressed: function(event) {
+            if (event.modifiers & Qt.AltModifier) event.accepted = true
+          }
+          onAccepted: ssh.create()
+        }
+        Text {
+          width: parent.width
+          textFormat: Text.PlainText
+          text: ssh.t("securityKey.ssh.applicationHint")
+          wrapMode: Text.Wrap
+          color: ssh.foreground
+          opacity: 0.6
+          font.family: ssh.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+        Text {
+          width: parent.width
+          textFormat: Text.PlainText
+          text: ssh.t("securityKey.ssh.user")
+          color: ssh.foreground
+          font.family: ssh.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+        TextField {
+          id: userField
+          Component.onCompleted: text = ssh.formUser
+          onTextChanged: ssh.formUser = text
+          width: parent.width
+          foreground: ssh.foreground
+          accent: ssh.accent
+          inputMethodHints: Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
+          maximumLength: 64
+          // Enter makes the key; Alt+key never reaches the text.
+          Keys.onPressed: function(event) {
+            if (event.modifiers & Qt.AltModifier) event.accepted = true
+          }
+          onAccepted: ssh.create()
+        }
+        Text {
+          width: parent.width
+          textFormat: Text.PlainText
+          text: ssh.t("securityKey.ssh.userHint")
+          wrapMode: Text.Wrap
+          color: ssh.foreground
+          opacity: 0.6
+          font.family: ssh.fontFamily
+          font.pixelSize: Style.font.caption
+        }
 
-    Toggle {
-      id: touchToggle
-      width: parent.width
-      label: ssh.t("securityKey.ssh.touch")
-      description: checked ? "" : ssh.t("securityKey.ssh.touchOff")
-      checked: true
-      foreground: ssh.foreground
-      accent: ssh.accent
-      fontFamily: ssh.fontFamily
-      onClicked: checked = !checked
-    }
+        Toggle {
+          id: verifyToggle
+          width: parent.width
+          label: ssh.t("securityKey.ssh.verify")
+          checked: ssh.formVerify
+          foreground: ssh.foreground
+          accent: ssh.accent
+          fontFamily: ssh.fontFamily
+          onClicked: ssh.formVerify = !ssh.formVerify
+        }
 
-    Text {
-      width: parent.width
-      textFormat: Text.PlainText
-      text: ssh.t("securityKey.ssh.comment")
-      color: ssh.foreground
-      font.family: ssh.fontFamily
-      font.pixelSize: Style.font.bodySmall
-    }
-    TextField {
-      id: commentField
-      width: parent.width
-      foreground: ssh.foreground
-      accent: ssh.accent
-      inputMethodHints: Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
-      maximumLength: 128
-      // Enter makes the key; Alt+key never reaches the text.
-      Keys.onPressed: function(event) {
-        if (event.modifiers & Qt.AltModifier) event.accepted = true
-      }
-      onAccepted: ssh.create()
-    }
+        Toggle {
+          id: touchToggle
+          width: parent.width
+          label: ssh.t("securityKey.ssh.touch")
+          description: checked ? "" : ssh.t("securityKey.ssh.touchOff")
+          checked: ssh.formTouch
+          foreground: ssh.foreground
+          accent: ssh.accent
+          fontFamily: ssh.fontFamily
+          onClicked: ssh.formTouch = !ssh.formTouch
+        }
 
-    Text {
-      width: parent.width
-      textFormat: Text.PlainText
-      text: ssh.problem !== "" ? ssh.t(Model.createProblemKey(ssh.problem))
-        : ssh.t("securityKey.ssh.fileName", "Saved as %1").arg(Model.ltr("~/.ssh/" + Model.handleName(ssh.options.algorithm, ssh.options.application, ssh.options.user)))
-      wrapMode: Text.WrapAnywhere
-      horizontalAlignment: Text.AlignLeft
-      color: ssh.problem !== "" ? ssh.urgent : ssh.foreground
-      opacity: ssh.problem !== "" ? 1 : 0.7
-      font.family: ssh.fontFamily
-      font.pixelSize: Style.font.caption
-    }
+        Text {
+          width: parent.width
+          textFormat: Text.PlainText
+          text: ssh.t("securityKey.ssh.comment")
+          color: ssh.foreground
+          font.family: ssh.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+        TextField {
+          id: commentField
+          Component.onCompleted: text = ssh.formComment
+          onTextChanged: ssh.formComment = text
+          width: parent.width
+          foreground: ssh.foreground
+          accent: ssh.accent
+          inputMethodHints: Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
+          maximumLength: 128
+          // Enter makes the key; Alt+key never reaches the text.
+          Keys.onPressed: function(event) {
+            if (event.modifiers & Qt.AltModifier) event.accepted = true
+          }
+          onAccepted: ssh.create()
+        }
 
-    Flow {
-      width: parent.width
-      spacing: Style.spacing.controlGap
+        Text {
+          width: parent.width
+          textFormat: Text.PlainText
+          text: ssh.problem !== "" ? ssh.t(Model.createProblemKey(ssh.problem))
+            : ssh.t("securityKey.ssh.fileName", "Saved as %1").arg(Model.ltr("~/.ssh/" + Model.handleName(ssh.options.algorithm, ssh.options.application, ssh.options.user)))
+          wrapMode: Text.WrapAnywhere
+          horizontalAlignment: Text.AlignLeft
+          color: ssh.problem !== "" ? ssh.urgent : ssh.foreground
+          opacity: ssh.problem !== "" ? 1 : 0.7
+          font.family: ssh.fontFamily
+          font.pixelSize: Style.font.caption
+        }
 
-      Button {
-        focusable: true
-        bordered: true
-        enabled: !ssh.busy && ssh.problem === ""
-        iconText: "󰐕"
-        text: Model.shortcut(ssh.t("securityKey.ssh.createKey"), "Enter")
-        foreground: ssh.foreground
-        accent: ssh.accent
-        fontFamily: ssh.fontFamily
-        onClicked: ssh.create()
-      }
+        Flow {
+          width: parent.width
+          spacing: Style.spacing.controlGap
 
-      Button {
-        focusable: true
-        bordered: true
-        text: Model.shortcut(ssh.t("securityKey.cancel"), "Esc")
-        foreground: ssh.foreground
-        accent: ssh.accent
-        fontFamily: ssh.fontFamily
-        onClicked: ssh.createClosed()
+          Button {
+            focusable: true
+            bordered: true
+            enabled: !ssh.busy && ssh.problem === ""
+            iconText: "󰐕"
+            text: Model.shortcut(ssh.t("securityKey.ssh.createKey"), "Enter")
+            foreground: ssh.foreground
+            accent: ssh.accent
+            fontFamily: ssh.fontFamily
+            onClicked: ssh.create()
+          }
+
+          Button {
+            focusable: true
+            bordered: true
+            text: Model.shortcut(ssh.t("securityKey.cancel"), "Esc")
+            foreground: ssh.foreground
+            accent: ssh.accent
+            fontFamily: ssh.fontFamily
+            onClicked: ssh.createClosed()
+          }
+        }
       }
     }
   }
