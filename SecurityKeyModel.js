@@ -82,7 +82,16 @@ var ERROR_KEYS = {
   "import-failed": "securityKey.gpg.importFailed",
   "trust-failed": "securityKey.gpg.trustFailed",
   "secret-on-disk": "securityKey.gpg.secretOnDisk",
-  "ssh-none": "securityKey.ssh.none"
+  "ssh-none": "securityKey.ssh.none",
+  "ssh-exists": "securityKey.ssh.exists",
+  "ssh-file-exists": "securityKey.ssh.fileExists",
+  "ssh-not-on-key": "securityKey.ssh.notOnKey",
+  "ssh-encrypted": "securityKey.ssh.encrypted",
+  "ssh-damaged": "securityKey.ssh.damaged",
+  "ssh-config-edited": "securityKey.ssh.hostLeftAlone",
+  "ssh-config-foreign": "securityKey.ssh.hostLeftAlone",
+  "ssh-config-link": "securityKey.ssh.hostLink",
+  "ssh-config-conflict": "securityKey.ssh.hostConflict"
 }
 
 function errorKey(code) {
@@ -96,7 +105,7 @@ function errorKey(code) {
 function removable(tab, credentials, sshKeys, n) {
   if (n < 0) return null
   if (tab === "fido" && credentials && n < credentials.length) return { kind: "fido", index: n }
-  if (tab === "ssh" && sshKeys && n < sshKeys.length) return { kind: "ssh", index: n, name: sshKeys[n] }
+  if (tab === "ssh" && sshKeys && n < sshKeys.length) return { kind: "ssh", index: n, name: sshKeys[n].name }
   return null
 }
 
@@ -125,7 +134,8 @@ function nextTab(tabs, current, by) {
   return tabs[(at + by + tabs.length * 2) % tabs.length]
 }
 
-// What a remove button asks to confirm: "fido:0", "ssh:<file>", "gpg".
+// What a remove button asks to confirm: "fido:0", "ssh:<file>",
+// "sshdel:<file>" (deleting the key from the security key), "gpg".
 function removeId(kind, which) {
   return kind === "gpg" ? "gpg" : kind + ":" + which
 }
@@ -134,6 +144,47 @@ function removeId(kind, which) {
 function section(op) {
   var dot = String(op || "").indexOf(".")
   return dot > 0 ? op.substring(0, dot) : ""
+}
+
+// Whether ~/.ssh still lists that file (sshKeys: the helper's entries).
+function hasSshKey(sshKeys, name) {
+  for (var i = 0; sshKeys && i < sshKeys.length; i++) if (sshKeys[i].name === name) return true
+  return false
+}
+
+// A new resident SSH key, as key-helper checks it (create_problem): what
+// follows "ssh:" in the application, and the user ID, are plain names (no
+// slashes or ".."), so the copy gets the file name `ssh-keygen -K` gives it;
+// the comment is printable ASCII. "" when the options are fine, else
+// "application", "user" (also a name ending in .pub) or "comment".
+var CREATE_APPLICATION = /^[A-Za-z0-9](?:[A-Za-z0-9._@:-]{0,126}[A-Za-z0-9])?$/
+var CREATE_USER = /^[A-Za-z0-9](?:[A-Za-z0-9._@-]{0,62}[A-Za-z0-9])?$/
+var SSH_ALGORITHMS = { "ed25519-sk": "ed25519_sk", "ecdsa-sk": "ecdsa_sk" }
+
+function handleName(algorithm, application, user) {
+  var suffix = [application, user].filter(function(part) { return part !== "" }).join("_")
+  return "id_" + (SSH_ALGORITHMS[algorithm] || "ed25519_sk") + "_rk" + (suffix !== "" ? "_" + suffix : "")
+}
+
+function createProblem(options) {
+  var application = String(options.application || "")
+  var user = String(options.user || "")
+  var comment = String(options.comment || "")
+  if (application !== "" && (!CREATE_APPLICATION.test(application) || application.indexOf("..") >= 0)) return "application"
+  if (user !== "" && (!CREATE_USER.test(user) || user.indexOf("..") >= 0)) return "user"
+  if (/\.pub$/.test(handleName(options.algorithm, application, user))) return "user"
+  if (comment.length > 128 || !/^[ -~]*$/.test(comment)) return "comment"
+  return ""
+}
+
+var CREATE_PROBLEM_KEYS = {
+  "application": "securityKey.ssh.invalidApplication",
+  "user": "securityKey.ssh.invalidUser",
+  "comment": "securityKey.ssh.invalidComment"
+}
+
+function createProblemKey(problem) {
+  return CREATE_PROBLEM_KEYS[problem] || ""
 }
 
 var KEY_STATE_KEYS = {
@@ -165,6 +216,10 @@ if (typeof module !== "undefined") {
     currentTab: currentTab,
     nextTab: nextTab,
     removeId: removeId,
-    shortcut: shortcut
+    shortcut: shortcut,
+    hasSshKey: hasSshKey,
+    handleName: handleName,
+    createProblem: createProblem,
+    createProblemKey: createProblemKey
   }
 }

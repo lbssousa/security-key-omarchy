@@ -6,7 +6,7 @@ import "SecurityKeyModel.js" as Model
 
 // The OpenPGP key stored on the card: who it belongs to, whether gpg knows
 // it (missing / public only / linked to the card) and trusts it, and the
-// buttons that import it, trust it and take it out of the keyring again
+// buttons that import (or update) it, trust it and take it out of the keyring again
 // (the key stays on the card). Shown only for keys with an OpenPGP
 // applet.
 Section {
@@ -25,7 +25,10 @@ Section {
   property string statusTone: "info"
   property color urgent: Commons.Color.urgent
 
-  readonly property bool canImport: keyState === "missing" || keyState === "public"
+  // Once gpg uses the card, importing again updates the public key (a new
+  // expiry date, new subkeys).
+  readonly property bool canImport: keyState === "missing" || keyState === "public" || keyState === "ready"
+  readonly property bool needsImport: keyState === "missing" || keyState === "public"
   readonly property bool canTrust: keyState !== "" && keyState !== "missing" && !trusted
   readonly property bool canRemove: keyState === "public" || keyState === "ready"
   readonly property bool asking: pending === "gpg"
@@ -103,7 +106,11 @@ Section {
       bordered: true
       enabled: !gpg.busy
       iconText: "󰇚"
-      text: Model.shortcut(gpg.keyState === "public" ? gpg.t("securityKey.gpg.link") : gpg.t("securityKey.gpg.import"), "Alt+I")
+      text: Model.shortcut(gpg.keyState === "public" ? gpg.t("securityKey.gpg.link")
+                           : gpg.keyState === "ready" ? gpg.t("securityKey.gpg.update")
+                           : gpg.t("securityKey.gpg.import"), "Alt+I")
+      // What still has to happen for gpg to use the card stands out.
+      active: gpg.needsImport
       foreground: gpg.foreground
       accent: gpg.accent
       fontFamily: gpg.fontFamily
