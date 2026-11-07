@@ -10,7 +10,9 @@ import "SecurityKeyModel.js" as Model
 // Security key overlay (YubiKey and other FIDO2 keys), after the Security
 // page of lbssousa/noctalia: registers the key for sudo and polkit
 // (pam_u2f, the user's own ~/.config/Yubico/u2f_keys), imports the OpenPGP
-// key stored on its card, and copies its resident SSH keys into ~/.ssh. Each
+// key stored on its card (or updates it), and copies its resident SSH keys
+// into ~/.ssh, makes new ones, deletes them from the key and sets ssh up for
+// the git hosts they name. Each
 // of the three has its own tab; the last two show only for keys that have
 // those features. Summoned
 // with `omarchy-shell shell summon lbssousa.security-key '{}'`
@@ -21,7 +23,8 @@ import "SecurityKeyModel.js" as Model
 // and every action has its own key, shown on its button, which opens its
 // tab too (Alt+R registers, Alt+1-9 removes a registered key or an SSH key,
 // counted down the tab shown, Alt+I imports the OpenPGP key, Alt+T trusts
-// it, Alt+D removes it from the keyring, Alt+S imports the SSH keys);
+// it, Alt+D removes it from the keyring, Alt+S imports the SSH keys, Alt+N
+// opens the form for a new one);
 // removing asks again first; F5 refreshes, Escape cancels what runs or
 // closes. When the card is taller than the screen it scrolls: the
 // wheel, the scroll bar, Up/Down, Page Up/Down, Home/End, and Tab brings the
@@ -51,6 +54,10 @@ Item {
   property string keyState: ""
   property bool trusted: false
   property var sshKeys: []
+  property var sshDefaults: ({ user: "", comment: "" })
+  // The form for a new SSH key is open, and the key it made last.
+  property bool sshCreating: false
+  property var sshCreated: null
 
   // The command running in the helper ("fido.register", "gpg.import", …).
   property string op: ""
@@ -62,6 +69,8 @@ Item {
   // and what it says.
   property string pinOp: ""
   property var pinState: ({ text: "", tone: "info" })
+  // What goes with it besides the PIN: { name } or { options }.
+  property var pinArgs: ({})
 
   // The tab picked ("fido", "gpg", "ssh"); `tab` is the one shown, the
   // first when the picked one went away with the key.
@@ -88,6 +97,8 @@ Item {
     root.op = ""
     root.pendingRemove = ""
     root.pinOp = ""
+    root.sshCreating = false
+    root.sshCreated = null
     root.chosenTab = ""
     root.status = { fido: null, gpg: null, ssh: null }
     root.helperLost = false
@@ -173,17 +184,22 @@ Item {
     }
   }
 
-  // Registering and importing the SSH keys take the key's PIN when it has
-  // one: asked in the dialog, which then shows the touch and any error.
-  function askPin(command) {
+  // Registering, importing or making SSH keys take the key's PIN when it has
+  // one, deleting one always: asked in the dialog, which then shows the
+  // touch and any error. <args> go with the command ({ name }, { options }).
+  function askPin(command, args) {
     if (root.busy || root.device === null) return
     root.pendingRemove = ""
-    if (root.device.clientPin !== true) {
-      run({ cmd: command })
+    var withArgs = Object.assign({ cmd: command }, args || {})
+    if (root.device.clientPin !== true && command !== "ssh.delete") {
+      run(withArgs)
       return
     }
     setStatus(Model.section(command), "", "info")
-    root.pinState = { text: tr.t("securityKey.error.pinRequired"), tone: "info" }
+    root.pinState = command === "ssh.delete"
+      ? { text: tr.t("securityKey.ssh.deleteWarning"), tone: "error" }
+      : { text: tr.t("securityKey.error.pinRequired"), tone: "info" }
+    root.pinArgs = args || {}
     root.pinOp = command
     Qt.callLater(pinDialog.focusPin)
   }
@@ -192,13 +208,36 @@ Item {
     if (root.busy || root.pinOp === "") return
     root.op = root.pinOp
     root.pinState = { text: tr.t("securityKey.working"), tone: "info" }
-    client.send({ cmd: root.pinOp, pin: pin })
+    client.send(Object.assign({ cmd: root.pinOp, pin: pin }, root.pinArgs))
+  }
+
+  // The PIN dialog's action, on its button.
+  function pinActionText() {
+    if (root.pinOp === "ssh.import") return tr.t("securityKey.ssh.import")
+    if (root.pinOp === "ssh.create")
+      return root.pinArgs.options && root.pinArgs.options.replace ? tr.t("securityKey.ssh.replace") : tr.t("securityKey.ssh.createKey")
+    if (root.pinOp === "ssh.delete") return tr.t("securityKey.ssh.delete")
+    return Model.hasActive(root.credentials) ? tr.t("securityKey.fido.registerAnother") : tr.t("securityKey.fido.register")
+  }
+
+  function openCreate() {
+    if (root.busy) return
+    root.pendingRemove = ""
+    root.sshCreated = null
+    setStatus("ssh", "", "info")
+    root.sshCreating = true
+  }
+
+  function closeCreate() {
+    root.sshCreating = false
+    Qt.callLater(function() { if (sshSection.visible) sshSection.focusAction() })
   }
 
   function closePin() {
     var section = Model.section(root.pinOp) === "ssh" ? sshSection : fidoSection
     selectTab(Model.section(root.pinOp))
     root.pinOp = ""
+    root.pinArgs = {}
     pinDialog.clear()
     Qt.callLater(function() {
       if (section.visible) section.focusAction()
@@ -217,6 +256,8 @@ Item {
     }
     if (kind === "fido") run({ cmd: "fido.remove", index: which })
     else if (kind === "ssh") run({ cmd: "ssh.remove", name: which })
+    // Deleting from the security key: the PIN dialog, with the warning again.
+    else if (kind === "sshdel") askPin("ssh.delete", { name: which })
     else run({ cmd: "gpg.remove" })
   }
 
@@ -227,7 +268,7 @@ Item {
     if (id === "") return
     var still = id === "gpg" ? gpgSection.canRemove
       : id.indexOf("fido:") === 0 ? Number(id.substring(5)) < root.credentials.length
-      : root.sshKeys.indexOf(id.substring(4)) >= 0
+      : Model.hasSshKey(root.sshKeys, id.substring(id.indexOf(":") + 1))
     if (!still) root.pendingRemove = ""
   }
 
@@ -263,6 +304,8 @@ Item {
       root.keyState = String(m.keyState || "")
       root.trusted = m.trusted === true
       root.sshKeys = list(m.sshKeys)
+      if (m.sshDefaults) root.sshDefaults = { user: String(m.sshDefaults.user || ""), comment: String(m.sshDefaults.comment || "") }
+      if (root.sshCreated && !Model.hasSshKey(root.sshKeys, root.sshCreated.name)) root.sshCreated = null
       checkPending()
       if (root.pinOp !== "" && !root.busy && root.device === null) closePin()
     } else if (m.type === "busy") {
@@ -275,10 +318,18 @@ Item {
     } else if (m.type === "done") {
       if (m.op === "fido.register") setStatus("fido", tr.t("securityKey.fido.registered"), "success")
       else if (m.op === "fido.remove") setStatus("fido", tr.t("securityKey.fido.removed"), "info")
-      else if (m.op === "gpg.import") setStatus("gpg", tr.t("securityKey.gpg.imported"), "success")
+      else if (m.op === "gpg.import") setStatus("gpg", tr.t(m.updated ? "securityKey.gpg.updated" : "securityKey.gpg.imported"), "success")
       else if (m.op === "gpg.trust") setStatus("gpg", tr.t("securityKey.gpg.trustedDone"), "success")
       else if (m.op === "gpg.remove") setStatus("gpg", tr.t("securityKey.gpg.removed"), "info")
       else if (m.op === "ssh.remove") setStatus("ssh", tr.t("securityKey.ssh.removed", "Removed from ~/.ssh: %1").arg(Model.ltr(String(m.name || ""))), "info")
+      else if (m.op === "ssh.delete") setStatus("ssh", tr.t("securityKey.ssh.deleted", "Deleted from the security key, with its copy: %1").arg(Model.ltr(String(m.name || ""))), "info")
+      else if (m.op === "ssh.host") setStatus("ssh", (m.enabled ? tr.t("securityKey.ssh.hostEnabled", "ssh now uses this key for %1.")
+                                                                : tr.t("securityKey.ssh.hostDisabled", "ssh no longer uses this key for %1.")).arg(String(m.host || "")), "success")
+      else if (m.op === "ssh.create") {
+        root.sshCreating = false
+        root.sshCreated = { name: String(m.name || ""), publicKey: String(m.publicKey || "") }
+        setStatus("ssh", m.host ? tr.t("securityKey.ssh.hostSuggest", "Its button \"Use for %1\" sets ssh up for that host.").arg(String(m.host)) : "", "info")
+      }
       else if (m.op === "ssh.import") {
         var lines = []
         var imported = list(m.imported)
@@ -290,7 +341,13 @@ Item {
       if (root.op === m.op) root.op = ""
       if (inDialog) closePin()
     } else if (m.type === "error") {
-      if (inDialog) {
+      if (inDialog && m.op === "ssh.create" && m.code === "ssh-exists") {
+        // A key with this application and user ID is on the security key:
+        // the dialog asks again, to replace it.
+        root.pinArgs = { options: Object.assign({}, root.pinArgs.options, { replace: true }) }
+        root.pinState = { text: errorText(m.code, m.detail), tone: "error" }
+        Qt.callLater(pinDialog.focusPin)
+      } else if (inDialog) {
         root.pinState = { text: errorText(m.code, m.detail), tone: "error" }
         Qt.callLater(pinDialog.focusPin)
       } else if (section !== "") {
@@ -308,7 +365,7 @@ Item {
   // only while its button would, and shows its tab first. Returns whether
   // the key was one of them.
   function altKey(key) {
-    if (!root.opened || !root.loaded || root.helperLost || root.busy || root.pinOp !== "") return false
+    if (!root.opened || !root.loaded || root.helperLost || root.busy || root.pinOp !== "" || root.sshCreating) return false
     var has = function(name) { return root.tabs.indexOf(name) >= 0 }
     if (key === Qt.Key_R && has("fido") && root.device !== null && Model.canRegister(root.target) && !Model.needsPin(root.pinRequired, root.device)) {
       selectTab("fido")
@@ -322,6 +379,9 @@ Item {
     } else if (key === Qt.Key_S && has("ssh") && root.device !== null) {
       selectTab("ssh")
       sshSection.submit()
+    } else if (key === Qt.Key_N && has("ssh") && root.device !== null) {
+      selectTab("ssh")
+      sshSection.openForm()
     } else if (key === Qt.Key_D && has("gpg") && gpgSection.canRemove) {
       selectTab("gpg")
       root.remove("gpg")
@@ -386,6 +446,7 @@ Item {
         } else if (event.key === Qt.Key_Escape) {
           if (root.busy) root.cancel()
           else if (root.pendingRemove !== "") root.pendingRemove = ""
+          else if (root.sshCreating) root.closeCreate()
           else root.dismiss()
           event.accepted = true
         } else if (event.key === Qt.Key_F5) {
@@ -658,9 +719,12 @@ Item {
                 strings: tr
                 device: root.device
                 present: root.sshKeys
+                defaults: root.sshDefaults
+                creating: root.sshCreating
+                created: root.sshCreated
                 pending: root.pendingRemove
                 busy: root.busy
-                running: Model.section(root.op) === "ssh" && root.op !== "ssh.remove" && root.pinOp === ""
+                running: Model.section(root.op) === "ssh" && root.op !== "ssh.remove" && root.op !== "ssh.host" && root.pinOp === ""
                 statusText: root.statusOf("ssh").text
                 statusTone: root.statusOf("ssh").tone
                 fontFamily: root.fontFamily
@@ -668,7 +732,15 @@ Item {
                 accent: root.accent
                 urgent: root.urgent
                 onImportRequested: root.askPin("ssh.import")
+                onCreateOpened: root.openCreate()
+                onCreateClosed: root.closeCreate()
+                onCreateRequested: function(options) { root.askPin("ssh.create", { options: options }) }
                 onRemoveRequested: function(name) { root.remove("ssh", name) }
+                onDeleteRequested: function(name) {
+                  root.remove("sshdel", name)
+                  if (root.pendingRemove !== "") sshSection.focusDelete(name)
+                }
+                onHostRequested: function(name, enable) { root.run({ cmd: "ssh.host", name: name, enable: enable }) }
                 onCancelRequested: root.cancel()
               }
             }
@@ -734,10 +806,10 @@ Item {
           color: root.background
           borderSpec: root.borderSpec
           strings: tr
-          glyph: root.pinOp === "ssh.import" ? "󰣀" : "󰌆"
-          title: root.pinOp === "ssh.import" ? tr.t("securityKey.ssh.title") : tr.t("securityKey.fido.title")
-          actionText: root.pinOp === "ssh.import" ? tr.t("securityKey.ssh.import")
-            : Model.hasActive(root.credentials) ? tr.t("securityKey.fido.registerAnother") : tr.t("securityKey.fido.register")
+          glyph: root.pinOp === "ssh.delete" ? "󰆴" : Model.section(root.pinOp) === "ssh" ? "󰣀" : "󰌆"
+          title: root.pinOp === "ssh.create" ? tr.t("securityKey.ssh.createTitle")
+            : Model.section(root.pinOp) === "ssh" ? tr.t("securityKey.ssh.title") : tr.t("securityKey.fido.title")
+          actionText: root.pinActionText()
           message: root.pinState.text
           tone: root.pinState.tone
           running: root.busy

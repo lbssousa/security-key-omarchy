@@ -1,20 +1,30 @@
 import QtQuick
+import Quickshell
 import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
 import "SecurityKeyModel.js" as Model
 
 // Resident SSH keys: downloads the key handles stored on the security key
-// (ssh-keygen -K) into ~/.ssh, and lists the ones there, each with its
-// remove button (the key itself keeps them). Shown for keys that keep
-// resident credentials, and while ~/.ssh holds such keys.
+// (ssh-keygen -K) into ~/.ssh, makes new ones there, and lists the ones in
+// ~/.ssh, each in its own box: remove the copy (the key keeps it), delete
+// the key from the security key for good, and, when its application names a
+// git host, have ssh use it for that host (~/.ssh/config.d). Shown for keys
+// that keep resident credentials, and while ~/.ssh holds such keys.
 Section {
   id: ssh
 
   property var strings: null
   property var device: null
+  // key-helper's entries: { name, application, host, hostState }.
   property var present: []
-  // The remove button waiting for confirmation (Model.removeId), or "".
+  // Suggestions for a new key: { user, comment }.
+  property var defaults: ({ user: "", comment: "" })
+  // The form for a new key is open (SecurityKey.qml owns it, for Escape).
+  property bool creating: false
+  // The key just made: { name, publicKey }, or null.
+  property var created: null
+  // The remove or delete button waiting for confirmation (Model.removeId), or "".
   property string pending: ""
   property bool busy: false
   property bool running: false
@@ -23,7 +33,12 @@ Section {
   property color urgent: Commons.Color.urgent
 
   signal importRequested()
+  signal createOpened()
+  signal createClosed()
+  signal createRequested(var options)
   signal removeRequested(string name)
+  signal deleteRequested(string name)
+  signal hostRequested(string name, bool enable)
   signal cancelRequested()
 
   function t(key, fallback) { return ssh.strings ? ssh.strings.t(key, fallback) : (fallback || key) }
@@ -39,63 +54,424 @@ Section {
     if (row) row.removeButton.forceActiveFocus()
   }
 
-  // Back to the import button once the PIN dialog closes.
+  function focusDelete(name) {
+    for (var i = 0; i < keyRows.count; i++) {
+      var row = keyRows.itemAt(i)
+      if (row && row.modelData.name === name) row.deleteButton.forceActiveFocus()
+    }
+  }
+
+  // Back to the button the PIN dialog came from once it closes.
   function focusAction() {
-    if (importButton.visible) importButton.forceActiveFocus()
+    if (ssh.creating) createForm.focusFirst()
+    else if (importButton.visible) importButton.forceActiveFocus()
+  }
+
+  function openForm() {
+    if (ssh.busy || !ssh.device) return
+    ssh.createOpened()
+  }
+
+  // The form, with fresh suggestions each time it opens.
+  onCreatingChanged: {
+    if (!ssh.creating) return
+    algorithmGroup.value = "ed25519-sk"
+    applicationField.text = ""
+    userField.text = ssh.defaults.user || ""
+    verifyToggle.checked = true
+    touchToggle.checked = true
+    commentField.text = ssh.defaults.comment || ""
+    Qt.callLater(createForm.focusFirst)
+  }
+
+  readonly property var options: ({
+    algorithm: algorithmGroup.value,
+    application: applicationField.text.trim(),
+    user: userField.text.trim(),
+    verify: verifyToggle.checked,
+    touch: touchToggle.checked,
+    comment: commentField.text.trim()
+  })
+  readonly property string problem: Model.createProblem(ssh.options)
+
+  function create() {
+    if (ssh.busy || ssh.problem !== "") return
+    ssh.createRequested(ssh.options)
+  }
+
+  function hostText(entry) {
+    if (entry.hostState === "on") return ssh.t("securityKey.ssh.hostOn", "ssh uses it for %1, without the agent.").arg(entry.host)
+    if (entry.hostState === "edited" || entry.hostState === "foreign")
+      return ssh.t("securityKey.ssh.hostLeftAlone", "%1 wasn't written by this overlay, or was changed by hand: it is left alone.")
+        .arg(Model.ltr("~/.ssh/config.d/" + entry.host + ".conf"))
+    return ""
   }
 
   glyph: "󰣀"
   title: t("securityKey.ssh.title")
   subtitle: t("securityKey.ssh.subtitle")
 
+  // -- the keys in ~/.ssh ---------------------------------------------------
+
   Repeater {
     id: keyRows
-    model: ssh.present
+    model: ssh.creating ? [] : ssh.present
 
-    Item {
+    Rectangle {
+      id: row
       required property var modelData
       required property int index
       readonly property alias removeButton: removeButton
-      readonly property bool asking: ssh.pending === Model.removeId("ssh", modelData)
-      readonly property string removeLabel: asking ? ssh.t("securityKey.fido.confirmRemove") : ssh.t("securityKey.fido.remove")
+      readonly property alias deleteButton: deleteButton
+      readonly property bool asking: ssh.pending === Model.removeId("ssh", modelData.name)
+      readonly property bool askingDelete: ssh.pending === Model.removeId("sshdel", modelData.name)
+      readonly property string removeLabel: asking ? ssh.t("securityKey.fido.confirmRemove") : ssh.t("securityKey.ssh.removeCopy")
       width: parent ? parent.width : 0
-      height: removeButton.implicitHeight
+      height: rowContent.implicitHeight + Style.spacing.lg * 2
+      radius: Style.cornerRadius
+      color: "transparent"
+      border.width: Math.max(1, Style.normalBorderWidth)
+      border.color: askingDelete ? ssh.urgent : Qt.rgba(ssh.foreground.r, ssh.foreground.g, ssh.foreground.b, 0.2)
 
-      Text {
-        anchors.left: parent.left
-        anchors.right: removeButton.left
-        anchors.rightMargin: Style.spacing.lg
-        anchors.verticalCenter: parent.verticalCenter
-        textFormat: Text.PlainText
-        text: "󰣀  " + Model.ltr("~/.ssh/" + modelData)
-        horizontalAlignment: Text.AlignLeft
-        color: ssh.foreground
-        font.family: ssh.fontFamily
-        font.pixelSize: Style.font.body
-        elide: Text.ElideMiddle
-      }
+      Column {
+        id: rowContent
+        x: Style.spacing.lg
+        y: Style.spacing.lg
+        width: parent.width - Style.spacing.lg * 2
+        spacing: Style.spacing.sm
 
-      Button {
-        id: removeButton
-        anchors.right: parent.right
-        anchors.verticalCenter: parent.verticalCenter
-        focusable: true
-        bordered: true
-        enabled: !ssh.busy
-        iconText: "󰩺"
-        text: index < 9 ? Model.shortcut(removeLabel, "Alt+" + (index + 1)) : removeLabel
-        selected: asking
-        foreground: asking ? ssh.urgent : ssh.foreground
-        accent: ssh.accent
-        fontFamily: ssh.fontFamily
-        onClicked: ssh.removeRequested(modelData)
+        Text {
+          width: parent.width
+          textFormat: Text.PlainText
+          text: "󰣀  " + Model.ltr("~/.ssh/" + row.modelData.name)
+          horizontalAlignment: Text.AlignLeft
+          color: ssh.foreground
+          font.family: ssh.fontFamily
+          font.pixelSize: Style.font.body
+          elide: Text.ElideMiddle
+        }
+
+        Text {
+          width: parent.width
+          visible: text !== ""
+          textFormat: Text.PlainText
+          text: [row.modelData.application ? Model.ltr(row.modelData.application) : "", ssh.hostText(row.modelData)]
+            .filter(function(s) { return s !== "" }).join(" · ")
+          wrapMode: Text.Wrap
+          horizontalAlignment: Text.AlignLeft
+          color: row.modelData.hostState === "on" ? ssh.accent : ssh.foreground
+          opacity: row.modelData.hostState === "on" ? 1 : 0.7
+          font.family: ssh.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+
+        Flow {
+          width: parent.width
+          spacing: Style.spacing.controlGap
+
+          Button {
+            id: removeButton
+            focusable: true
+            bordered: true
+            enabled: !ssh.busy
+            iconText: "󰩺"
+            text: row.index < 9 ? Model.shortcut(row.removeLabel, "Alt+" + (row.index + 1)) : row.removeLabel
+            selected: row.asking
+            foreground: row.asking ? ssh.urgent : ssh.foreground
+            accent: ssh.accent
+            fontFamily: ssh.fontFamily
+            onClicked: ssh.removeRequested(row.modelData.name)
+          }
+
+          Button {
+            id: deleteButton
+            visible: !!ssh.device
+            focusable: true
+            bordered: true
+            enabled: !ssh.busy
+            iconText: "󰆴"
+            text: row.askingDelete ? ssh.t("securityKey.ssh.confirmDelete") : ssh.t("securityKey.ssh.delete")
+            selected: row.askingDelete
+            foreground: ssh.urgent
+            accent: ssh.accent
+            fontFamily: ssh.fontFamily
+            onClicked: ssh.deleteRequested(row.modelData.name)
+          }
+
+          Button {
+            visible: row.modelData.hostState === "on" || row.modelData.hostState === "off"
+            focusable: true
+            bordered: true
+            enabled: !ssh.busy
+            iconText: row.modelData.hostState === "on" ? "󰅙" : "󰒓"
+            text: (row.modelData.hostState === "on" ? ssh.t("securityKey.ssh.hostDisable", "Stop using for %1")
+                                                     : ssh.t("securityKey.ssh.hostEnable", "Use for %1")).arg(row.modelData.host)
+            foreground: ssh.foreground
+            accent: ssh.accent
+            fontFamily: ssh.fontFamily
+            onClicked: ssh.hostRequested(row.modelData.name, row.modelData.hostState !== "on")
+          }
+        }
+
+        Text {
+          width: parent.width
+          visible: row.askingDelete
+          textFormat: Text.PlainText
+          text: ssh.t("securityKey.ssh.deleteWarning")
+          wrapMode: Text.Wrap
+          horizontalAlignment: Text.AlignLeft
+          color: ssh.urgent
+          font.family: ssh.fontFamily
+          font.pixelSize: Style.font.caption
+        }
       }
     }
   }
 
+  // -- the key just made: its public key, to hand to the server ----------
+
+  Column {
+    width: parent.width
+    visible: !ssh.creating && !!ssh.created
+    spacing: Style.spacing.sm
+
+    Text {
+      width: parent.width
+      textFormat: Text.PlainText
+      text: ssh.created ? ssh.t("securityKey.ssh.created", "Created %1. Its public key, for the server or git host:").arg(Model.ltr("~/.ssh/" + ssh.created.name)) : ""
+      wrapMode: Text.Wrap
+      horizontalAlignment: Text.AlignLeft
+      color: ssh.foreground
+      font.family: ssh.fontFamily
+      font.pixelSize: Style.font.bodySmall
+    }
+
+    TextEdit {
+      width: parent.width
+      readOnly: true
+      selectByMouse: true
+      textFormat: TextEdit.PlainText
+      text: ssh.created ? ssh.created.publicKey : ""
+      wrapMode: TextEdit.WrapAnywhere
+      color: ssh.foreground
+      selectionColor: ssh.accent
+      font.family: "monospace"
+      font.pixelSize: Style.font.caption
+    }
+
+    Button {
+      focusable: true
+      bordered: true
+      iconText: "󰆏"
+      text: ssh.t("securityKey.ssh.copy")
+      foreground: ssh.foreground
+      accent: ssh.accent
+      fontFamily: ssh.fontFamily
+      onClicked: if (ssh.created) Quickshell.clipboardText = ssh.created.publicKey
+    }
+  }
+
+  // -- a new key --------------------------------------------------------------
+
+  Column {
+    id: createForm
+    width: parent.width
+    visible: ssh.creating
+    spacing: Style.spacing.sm
+
+    function focusFirst() { applicationField.forceActiveFocus() }
+
+    Text {
+      width: parent.width
+      textFormat: Text.PlainText
+      text: ssh.t("securityKey.ssh.createTitle")
+      color: ssh.foreground
+      font.family: ssh.fontFamily
+      font.pixelSize: Style.font.subtitle
+    }
+
+    Text {
+      width: parent.width
+      textFormat: Text.PlainText
+      text: ssh.t("securityKey.ssh.algorithm")
+      color: ssh.foreground
+      font.family: ssh.fontFamily
+      font.pixelSize: Style.font.bodySmall
+    }
+    ButtonGroup {
+      id: algorithmGroup
+      options: [{ value: "ed25519-sk", label: "ed25519-sk" }, { value: "ecdsa-sk", label: "ecdsa-sk" }]
+      value: "ed25519-sk"
+      foreground: ssh.foreground
+      accent: ssh.accent
+      fontFamily: ssh.fontFamily
+      onChanged: function(value) { algorithmGroup.value = value }
+    }
+    Text {
+      width: parent.width
+      textFormat: Text.PlainText
+      text: ssh.t("securityKey.ssh.algorithmHint")
+      wrapMode: Text.Wrap
+      color: ssh.foreground
+      opacity: 0.6
+      font.family: ssh.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+    Text {
+      width: parent.width
+      textFormat: Text.PlainText
+      text: ssh.t("securityKey.ssh.application")
+      color: ssh.foreground
+      font.family: ssh.fontFamily
+      font.pixelSize: Style.font.bodySmall
+    }
+    TextField {
+      id: applicationField
+      width: parent.width
+      foreground: ssh.foreground
+      accent: ssh.accent
+      inputMethodHints: Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
+      placeholderText: "github.com"
+      maximumLength: 128
+      // Enter makes the key; Alt+key never reaches the text.
+      Keys.onPressed: function(event) {
+        if (event.modifiers & Qt.AltModifier) event.accepted = true
+      }
+      onAccepted: ssh.create()
+    }
+    Text {
+      width: parent.width
+      textFormat: Text.PlainText
+      text: ssh.t("securityKey.ssh.applicationHint")
+      wrapMode: Text.Wrap
+      color: ssh.foreground
+      opacity: 0.6
+      font.family: ssh.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+    Text {
+      width: parent.width
+      textFormat: Text.PlainText
+      text: ssh.t("securityKey.ssh.user")
+      color: ssh.foreground
+      font.family: ssh.fontFamily
+      font.pixelSize: Style.font.bodySmall
+    }
+    TextField {
+      id: userField
+      width: parent.width
+      foreground: ssh.foreground
+      accent: ssh.accent
+      inputMethodHints: Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
+      maximumLength: 64
+      // Enter makes the key; Alt+key never reaches the text.
+      Keys.onPressed: function(event) {
+        if (event.modifiers & Qt.AltModifier) event.accepted = true
+      }
+      onAccepted: ssh.create()
+    }
+    Text {
+      width: parent.width
+      textFormat: Text.PlainText
+      text: ssh.t("securityKey.ssh.userHint")
+      wrapMode: Text.Wrap
+      color: ssh.foreground
+      opacity: 0.6
+      font.family: ssh.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+
+    Toggle {
+      id: verifyToggle
+      width: parent.width
+      label: ssh.t("securityKey.ssh.verify")
+      checked: true
+      foreground: ssh.foreground
+      accent: ssh.accent
+      fontFamily: ssh.fontFamily
+      onClicked: checked = !checked
+    }
+
+    Toggle {
+      id: touchToggle
+      width: parent.width
+      label: ssh.t("securityKey.ssh.touch")
+      description: checked ? "" : ssh.t("securityKey.ssh.touchOff")
+      checked: true
+      foreground: ssh.foreground
+      accent: ssh.accent
+      fontFamily: ssh.fontFamily
+      onClicked: checked = !checked
+    }
+
+    Text {
+      width: parent.width
+      textFormat: Text.PlainText
+      text: ssh.t("securityKey.ssh.comment")
+      color: ssh.foreground
+      font.family: ssh.fontFamily
+      font.pixelSize: Style.font.bodySmall
+    }
+    TextField {
+      id: commentField
+      width: parent.width
+      foreground: ssh.foreground
+      accent: ssh.accent
+      inputMethodHints: Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
+      maximumLength: 128
+      // Enter makes the key; Alt+key never reaches the text.
+      Keys.onPressed: function(event) {
+        if (event.modifiers & Qt.AltModifier) event.accepted = true
+      }
+      onAccepted: ssh.create()
+    }
+
+    Text {
+      width: parent.width
+      textFormat: Text.PlainText
+      text: ssh.problem !== "" ? ssh.t(Model.createProblemKey(ssh.problem))
+        : ssh.t("securityKey.ssh.fileName", "Saved as %1").arg(Model.ltr("~/.ssh/" + Model.handleName(ssh.options.algorithm, ssh.options.application, ssh.options.user)))
+      wrapMode: Text.WrapAnywhere
+      horizontalAlignment: Text.AlignLeft
+      color: ssh.problem !== "" ? ssh.urgent : ssh.foreground
+      opacity: ssh.problem !== "" ? 1 : 0.7
+      font.family: ssh.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+
+    Flow {
+      width: parent.width
+      spacing: Style.spacing.controlGap
+
+      Button {
+        focusable: true
+        bordered: true
+        enabled: !ssh.busy && ssh.problem === ""
+        iconText: "󰐕"
+        text: Model.shortcut(ssh.t("securityKey.ssh.createKey"), "Enter")
+        foreground: ssh.foreground
+        accent: ssh.accent
+        fontFamily: ssh.fontFamily
+        onClicked: ssh.create()
+      }
+
+      Button {
+        focusable: true
+        bordered: true
+        text: Model.shortcut(ssh.t("securityKey.cancel"), "Esc")
+        foreground: ssh.foreground
+        accent: ssh.accent
+        fontFamily: ssh.fontFamily
+        onClicked: ssh.createClosed()
+      }
+    }
+  }
+
+  // -- import and create --------------------------------------------------
+
   Flow {
     width: parent.width
-    visible: !!ssh.device
+    visible: !!ssh.device && !ssh.creating
     spacing: Style.spacing.controlGap
 
     Button {
@@ -110,6 +486,19 @@ Section {
       accent: ssh.accent
       fontFamily: ssh.fontFamily
       onClicked: ssh.submit()
+    }
+
+    Button {
+      visible: !ssh.running
+      focusable: true
+      bordered: true
+      enabled: !ssh.busy
+      iconText: "󰐕"
+      text: Model.shortcut(ssh.t("securityKey.ssh.create"), "Alt+N")
+      foreground: ssh.foreground
+      accent: ssh.accent
+      fontFamily: ssh.fontFamily
+      onClicked: ssh.openForm()
     }
 
     Button {
@@ -136,7 +525,7 @@ Section {
 
   Text {
     width: parent.width
-    visible: ssh.present.length > 0
+    visible: ssh.present.length > 0 && !ssh.creating
     textFormat: Text.PlainText
     text: ssh.t("securityKey.ssh.touchNote")
     wrapMode: Text.Wrap

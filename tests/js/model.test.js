@@ -70,7 +70,7 @@ test("latin runs isolated for right-to-left text", () => {
 
 test("Alt+N counts the removable items of the tab shown", () => {
   const creds = [{ label: "a" }, { label: "b" }]
-  const ssh = ["id_ed25519_sk_rk", "id_ed25519_sk_rk_github.com"]
+  const ssh = [{ name: "id_ed25519_sk_rk" }, { name: "id_ed25519_sk_rk_github.com" }]
   assert.deepEqual(Model.removable("fido", creds, ssh, 1), { kind: "fido", index: 1 })
   assert.equal(Model.removable("fido", creds, ssh, 2), null)
   assert.deepEqual(Model.removable("ssh", creds, ssh, 1), { kind: "ssh", index: 1, name: "id_ed25519_sk_rk_github.com" })
@@ -87,7 +87,7 @@ test("one tab per section the key can do", () => {
   const card = { serial: "1" }
   assert.deepEqual(Model.tabs([yubikey], [], card, []), ["fido", "gpg", "ssh"])
   assert.deepEqual(Model.tabs([{ path: "/dev/hidraw2", rk: false }], [], null, []), ["fido"])
-  assert.deepEqual(Model.tabs([], [{ label: "a" }], null, ["id_ed25519_sk_rk"]), ["fido", "ssh"])
+  assert.deepEqual(Model.tabs([], [{ label: "a" }], null, [{ name: "id_ed25519_sk_rk" }]), ["fido", "ssh"])
   assert.deepEqual(Model.tabs([], [], card, []), ["gpg"])
   assert.deepEqual(Model.tabs([], [], null, []), [])
 })
@@ -103,4 +103,28 @@ test("the tab shown, and Ctrl+Tab round the tabs", () => {
   assert.equal(Model.nextTab(all, "fido", -1), "ssh")
   assert.equal(Model.nextTab(["gpg"], "gpg", 1), "gpg")
   assert.equal(Model.nextTab([], "fido", 1), "")
+})
+
+test("new SSH keys: the copy's file name and what the helper would refuse", () => {
+  const options = { algorithm: "ed25519-sk", application: "github.com", user: "0123456789abcdef", comment: "ada@host" }
+  assert.equal(Model.handleName("ed25519-sk", "github.com", "work"), "id_ed25519_sk_rk_github.com_work")
+  assert.equal(Model.handleName("ecdsa-sk", "", ""), "id_ecdsa_sk_rk")
+  assert.equal(Model.createProblem(options), "")
+  assert.equal(Model.createProblem({ ...options, application: "", user: "" }), "")
+  assert.equal(Model.createProblem({ ...options, application: "a/b" }), "application")
+  assert.equal(Model.createProblem({ ...options, application: "a..b" }), "application")
+  assert.equal(Model.createProblem({ ...options, user: "work.pub" }), "user")
+  assert.equal(Model.createProblem({ ...options, application: "x.pub", user: "" }), "user")
+  assert.equal(Model.createProblem({ ...options, comment: "café" }), "comment")
+  assert.equal(Model.createProblem({ ...options, comment: "a".repeat(129) }), "comment")
+  assert.equal(Model.createProblemKey("user"), "securityKey.ssh.invalidUser")
+  assert.equal(Model.createProblemKey(""), "")
+})
+
+test("SSH keys by name, and the new error codes", () => {
+  const ssh = [{ name: "id_ed25519_sk_rk" }]
+  assert.equal(Model.hasSshKey(ssh, "id_ed25519_sk_rk"), true)
+  assert.equal(Model.hasSshKey(ssh, "id_x"), false)
+  assert.equal(Model.errorKey("ssh-not-on-key"), "securityKey.ssh.notOnKey")
+  assert.equal(Model.errorKey("ssh-config-foreign"), "securityKey.ssh.hostLeftAlone")
 })

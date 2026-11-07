@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.6.0 (2026-11-07)
+
+Brought over from omarchy-yubikey, with the fixes its review asked for:
+
+- **New resident SSH keys**, from a form in the SSH tab (Alt+N): type,
+  application, a random user ID by default, PIN and touch for every use, and
+  a comment. The options are checked before the key is touched (no accented
+  comments, no user ID that would name the copy like a `.pub` file), the copy
+  gets the name `ssh-keygen -K` gives it, never over a file already there, and
+  the overlay shows the public key with a copy button. A key with the same
+  application and user ID on the security key is replaced only after the PIN
+  dialog asks again.
+- **Delete from security key**, next to each copy's *Remove copy*: two presses
+  and the PIN, with a warning that it can't be undone. Only the credential of
+  that copy is deleted, matched by its key handle, so a copy of a key replaced
+  since deletes nothing; the host file is checked before anything is deleted.
+- **Git hosts**: *Use for &lt;host&gt;* on keys whose application names a git
+  host writes `~/.ssh/config.d/<host>.conf` (the host's keys, without the
+  agent) and the `Include` for it. Hand-written or hand-edited files are left
+  alone. Removing a copy takes it out of its host file.
+- **OpenPGP**: once gpg uses the card, the import button reads *Update key*
+  and fetches the public key again; until then it stands out.
+- `sshKeys` in the helper's state are objects (`name`, `application`, `host`,
+  `hostState`), and the state carries suggestions for a new key.
+
 ## 0.5.0 (2026-11-04)
 
 - When sudo or polkit demand the PIN (`pinverification=1` on `pam_u2f`), a key

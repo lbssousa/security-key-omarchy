@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import importlib.machinery
 import importlib.util
 import json
@@ -33,6 +34,40 @@ fpr:::::::::PRIMARY0000000000000000000000000000000000:
 """
 CRED1 = "HANDLEONE111,pubkey1,es256,+presence"
 CRED2 = "HANDLETWO222,pubkey2,es256,+presence"
+
+# Resident SSH keys, built the way ssh-keygen writes them (no key needed).
+ED25519_SK = "sk-ssh-ed25519@openssh.com"
+
+
+def ssh_str(data):
+    return len(data).to_bytes(4, "big") + data
+
+
+def sk_blob(application, point=b"\x01" * 32):
+    return ssh_str(ED25519_SK.encode()) + ssh_str(point) + ssh_str(application.encode())
+
+
+def pub_text(application, point=b"\x01" * 32):
+    return "%s %s ada@host\n" % (ED25519_SK, base64.b64encode(sk_blob(application, point)).decode())
+
+
+def handle_text(application, credential, point=b"\x01" * 32, cipher=b"none"):
+    private = b"\0\0\0\7" * 2 + ssh_str(ED25519_SK.encode()) + ssh_str(point) + ssh_str(application.encode())
+    private += b"\x01" + ssh_str(credential) + ssh_str(b"") + ssh_str(b"ada@host")
+    private += bytes(range(1, 1 + (-len(private) % 8)))
+    data = b"openssh-key-v1\0" + ssh_str(cipher) + ssh_str(b"none" if cipher == b"none" else b"bcrypt")
+    data += ssh_str(b"") + b"\0\0\0\1" + ssh_str(sk_blob(application, point)) + ssh_str(private)
+    return ("-----BEGIN OPENSSH PRIVATE KEY-----\n" + base64.b64encode(data).decode()
+            + "\n-----END OPENSSH PRIVATE KEY-----\n")
+
+
+def token_listing(*credentials):
+    return "".join("%02d: %s (null) dXNlcg== eddsa uvopt+id\n" % (i, base64.b64encode(c).decode())
+                   for i, c in enumerate(credentials))
+
+
+CREATE = {"algorithm": "ed25519-sk", "application": "github.com", "user": "0123456789abcdef",
+          "verify": True, "touch": True, "comment": "ada@host"}
 
 
 class FakeRunner:
@@ -151,7 +186,10 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(state["target"]["kind"], "own")
         self.assertEqual(state["card"]["serial"], "20373235")
         self.assertEqual((state["keyState"], state["trusted"]), ("ready", True))
-        self.assertEqual(state["sshKeys"], ["id_ed25519_sk_rk"])
+        self.assertEqual(state["sshKeys"], [{"name": "id_ed25519_sk_rk", "application": "", "host": "",
+                                             "hostState": ""}])
+        self.assertEqual(len(state["sshDefaults"]["user"]), 16)
+        self.assertEqual(state["sshDefaults"]["comment"].split("@")[0], "ada")
         self.assertEqual(state["sharedCount"], 0)
 
     def test_key_states(self):
@@ -506,6 +544,250 @@ class SessionTest(unittest.TestCase):
         self.runner.answers[("ssh-keygen", "-K")] = helper.Result(255, "", "Unable to load resident keys: PIN incorrect")
         self.run_op(self.session.ssh_import("0000"))
         self.assertEqual(self.last("error")["code"], "pin-invalid")
+
+    # -- SSH: new keys, deleting them, git hosts ---------------------------
+
+    def ssh_key(self, name, application, credential=b"C" * 64, point=b"\x01" * 32, cipher=b"none"):
+        ssh = self.home / ".ssh"
+        ssh.mkdir(exist_ok=True)
+        (ssh / name).write_text(handle_text(application, credential, point, cipher))
+        (ssh / (name + ".pub")).write_text(pub_text(application, point))
+        return ssh
+
+    def test_parse_public_and_handle(self):
+        public = helper.parse_public(pub_text("ssh:github.com"))
+        self.assertEqual((public["type"], public["application"]), ("ed25519-sk", "ssh:github.com"))
+        handle = helper.parse_handle(handle_text("ssh:github.com", b"K" * 48))
+        self.assertEqual((handle["encrypted"], handle["credential"]), (False, b"K" * 48))
+        self.assertEqual(handle["blob"], public["blob"])
+        encrypted = helper.parse_handle(handle_text("ssh:github.com", b"K" * 48, cipher=b"aes256-ctr"))
+        self.assertEqual((encrypted["encrypted"], encrypted["credential"]), (True, None))
+        self.assertIsNone(helper.parse_public("ssh-ed25519 AAAA x"))
+        with self.assertRaises(ValueError):
+            helper.parse_handle("not a key")
+
+    def test_git_remotes(self):
+        self.assertEqual(helper.git_remote("ssh:github.com"), ("git", "github.com", ""))
+        self.assertEqual(helper.git_remote("ssh:me@git.example.org:2222"), ("me", "git.example.org", "2222"))
+        for application in ("ssh:", "ssh:work", "ssh:example.org", "ssh:github.com:99999", "github.com"):
+            self.assertIsNone(helper.git_remote(application), application)
+
+    def test_create_options_are_checked_before_the_key_is_touched(self):
+        self.registered()
+        bad = [{"comment": "café"}, {"comment": "a" * 129}, {"user": "work.pub"}, {"user": "a/b"},
+               {"user": "a..b"}, {"application": "x/y"}, {"application": "", "user": "x.pub"},
+               {"algorithm": "rsa"}, {"verify": "yes"}]
+        for change in bad:
+            self.events.clear()
+            self.run_op(self.session.ssh_create(dict(CREATE, **change), "1234"))
+            self.assertEqual(self.last("error")["code"], "ssh-invalid", change)
+        self.assertEqual(self.runner.ran("ssh-keygen"), [])
+        self.assertEqual(helper.create_problem(dict(CREATE, application="", user="")), "")
+
+    def creating(self, seen, exists=False):
+        async def keygen(args, stdin, env, cwd):
+            if args[0] != "ssh-keygen":
+                return None
+            seen.setdefault("runs", []).append((args, stdin))
+            reader, writer = await asyncio.open_unix_connection(env[helper.ASKPASS_ENV])
+            writer.write(b"Enter PIN for ED25519-SK key: \n")
+            await writer.drain()
+            seen["pin"] = (await reader.readline()).decode().strip()
+            writer.close()
+            if exists and stdin != "y\n":
+                return helper.Result(255, "A resident key scoped to 'ssh:github.com' with user id "
+                                          "'0123456789abcdef' already exists.\nOverwrite key in token (y/n)? ",
+                                     "Key enrollment failed: requested feature not supported")
+            path = args[args.index("-f") + 1]
+            pathlib.Path(path).write_text(handle_text("ssh:github.com", b"N" * 64))
+            pathlib.Path(path + ".pub").write_text(pub_text("ssh:github.com"))
+            return helper.Result(0)
+        return keygen
+
+    def test_create_makes_the_key_and_copies_it_in(self):
+        self.registered()
+        seen = {}
+        self.runner.hook = self.creating(seen)
+        self.run_op(self.session.ssh_create(dict(CREATE, touch=False), "4321"))
+        args, stdin = seen["runs"][0]
+        name = "id_ed25519_sk_rk_github.com_0123456789abcdef"
+        self.assertEqual(args[:-1], ["ssh-keygen", "-t", "ed25519-sk", "-O", "resident",
+                                     "-O", "application=ssh:github.com", "-O", "user=0123456789abcdef",
+                                     "-O", "verify-required", "-O", "no-touch-required",
+                                     "-C", "ada@host", "-N", "", "-f"])
+        self.assertEqual(os.path.basename(args[-1]), name)
+        self.assertEqual((stdin, seen["pin"]), ("n\n", "4321"))
+        done = self.last("done")
+        self.assertEqual((done["op"], done["name"], done["host"]), ("ssh.create", name, "github.com"))
+        self.assertTrue(done["publicKey"].startswith(ED25519_SK + " "))
+        ssh = self.home / ".ssh"
+        self.assertEqual(stat.S_IMODE((ssh / name).stat().st_mode), 0o600)
+        self.assertEqual([n for n in os.listdir(self.tmp.name) if n.startswith("security-key-")], [])
+
+    def test_create_asks_before_replacing_a_key_on_the_security_key(self):
+        self.registered()
+        seen = {}
+        self.runner.hook = self.creating(seen, exists=True)
+        self.run_op(self.session.ssh_create(CREATE, "4321"))
+        self.assertEqual(self.last("error")["code"], "ssh-exists")
+        self.assertFalse((self.home / ".ssh").exists())
+        self.run_op(self.session.ssh_create(dict(CREATE, replace=True), "4321"))
+        self.assertEqual(seen["runs"][-1][1], "y\n")
+        self.assertEqual(self.last("done")["op"], "ssh.create")
+
+    def test_create_never_overwrites_a_file_in_ssh(self):
+        self.registered()
+        ssh = self.home / ".ssh"
+        ssh.mkdir()
+        (ssh / "id_ed25519_sk_rk_github.com_0123456789abcdef.pub").write_text("mine")
+        self.run_op(self.session.ssh_create(CREATE, "4321"))
+        self.assertEqual(self.last("error")["code"], "ssh-file-exists")
+        self.assertEqual(self.runner.ran("ssh-keygen"), [])
+
+    def test_create_failure_reports_the_code(self):
+        self.registered()
+        self.runner.answers[("ssh-keygen", "-t")] = helper.Result(255, "", "Key enrollment failed: PIN incorrect")
+        self.run_op(self.session.ssh_create(CREATE, "0000"))
+        self.assertEqual(self.last("error")["code"], "pin-invalid")
+
+    def test_delete_takes_the_exact_credential_off_the_key_then_the_copy(self):
+        name = "id_ed25519_sk_rk_github.com_work"
+        ssh = self.ssh_key(name, "ssh:github.com", credential=b"MINE" * 16)
+        (ssh / "config.d").mkdir()
+        other = "id_ed25519_sk_rk_github.com_home"
+        self.ssh_key(other, "ssh:github.com", credential=b"HOME" * 16)
+        (ssh / "config.d" / "github.com.conf").write_text(helper.drop_in_text([name, other], ("git", "github.com", "")))
+        self.registered()
+        self.runner.answers[("fido2-token", "-L")] = helper.Result(0, DEVICES)
+        listing = token_listing(b"HOME" * 16, b"MINE" * 16)
+
+        async def token(args, stdin, env, cwd):
+            if args[:3] == ["fido2-token", "-L", "-k"]:
+                return helper.Result(0, listing)
+            return None
+
+        self.runner.hook = token
+        self.run_op(self.session.ssh_delete(name, "4321"))
+        listed = self.runner.ran("fido2-token", "-L", "-k")[0]
+        self.assertEqual((listed[0][3:], listed[1]), (["ssh:github.com", "/dev/hidraw1"], "4321\n"))
+        deleted = self.runner.ran("fido2-token", "-D")[0]
+        self.assertEqual((deleted[0][3], deleted[1]), (base64.b64encode(b"MINE" * 16).decode(), "4321\n"))
+        self.assertEqual(self.last("done"), {"type": "done", "op": "ssh.delete", "name": name})
+        self.assertFalse((ssh / name).exists() or (ssh / (name + ".pub")).exists())
+        self.assertEqual((ssh / "config.d" / "github.com.conf").read_text(),
+                         helper.drop_in_text([other], ("git", "github.com", "")))
+
+    def test_delete_refuses_a_copy_whose_key_is_not_on_the_security_key(self):
+        # A copy kept after its key was replaced: same application and user ID,
+        # another credential. Nothing may be deleted.
+        name = "id_ed25519_sk_rk_github.com_work"
+        ssh = self.ssh_key(name, "ssh:github.com", credential=b"OLD!" * 16)
+        self.registered()
+
+        async def token(args, stdin, env, cwd):
+            if args[:3] == ["fido2-token", "-L", "-k"]:
+                return helper.Result(0, token_listing(b"NEW!" * 16))
+            return None
+
+        self.runner.hook = token
+        self.run_op(self.session.ssh_delete(name, "4321"))
+        self.assertEqual(self.last("error")["code"], "ssh-not-on-key")
+        self.assertEqual(self.runner.ran("fido2-token", "-D"), [])
+        self.assertTrue((ssh / name).exists())
+
+    def test_delete_checks_everything_before_touching_the_key(self):
+        self.registered()
+        ssh = self.ssh_key("id_ed25519_sk_rk_x", "ssh:x", cipher=b"aes256-ctr")
+        self.run_op(self.session.ssh_delete("id_ed25519_sk_rk_x", "4321"))
+        self.assertEqual(self.last("error")["code"], "ssh-encrypted")
+        # The .pub of another key next to this handle.
+        self.ssh_key("id_ed25519_sk_rk_y", "ssh:y")
+        (ssh / "id_ed25519_sk_rk_y.pub").write_text(pub_text("ssh:y", point=b"\x02" * 32))
+        self.run_op(self.session.ssh_delete("id_ed25519_sk_rk_y", "4321"))
+        self.assertEqual(self.last("error")["code"], "ssh-damaged")
+        # A drop-in edited by hand that lists the key.
+        name = "id_ed25519_sk_rk_github.com"
+        self.ssh_key(name, "ssh:github.com")
+        (ssh / "config.d").mkdir()
+        (ssh / "config.d" / "github.com.conf").write_text(
+            helper.drop_in_text([name], ("git", "github.com", "")) + "    ForwardAgent no\n")
+        self.run_op(self.session.ssh_delete(name, "4321"))
+        self.assertEqual(self.last("error")["code"], "ssh-config-edited")
+        self.assertEqual(self.runner.ran("fido2-token", "-L", "-k"), [])
+        self.assertEqual(self.runner.ran("fido2-token", "-D"), [])
+
+    def test_delete_with_a_wrong_pin(self):
+        self.ssh_key("id_ed25519_sk_rk_x", "ssh:x")
+        self.registered()
+
+        async def token(args, stdin, env, cwd):
+            if args[:3] == ["fido2-token", "-L", "-k"]:
+                return helper.Result(1, "", "fido2-token: fido_credman_get_dev_rk: FIDO_ERR_PIN_INVALID")
+            return None
+
+        self.runner.hook = token
+        self.run_op(self.session.ssh_delete("id_ed25519_sk_rk_x", "0000"))
+        self.assertEqual(self.last("error")["code"], "pin-invalid")
+        self.assertEqual(self.runner.ran("fido2-token", "-D"), [])
+
+    def test_host_drop_in_and_include(self):
+        name = "id_ed25519_sk_rk_github.com_work"
+        ssh = self.ssh_key(name, "ssh:github.com")
+        (ssh / "config").write_text("Host *\n    ServerAliveInterval 60\n")
+        os.chmod(ssh / "config", 0o640)
+        self.registered()
+        self.assertEqual(self.session.ssh_entries()[0]["hostState"], "off")
+        self.run_op(self.session.ssh_host(name, True))
+        self.assertEqual(self.last("done")["enabled"], True)
+        drop_in = ssh / "config.d" / "github.com.conf"
+        self.assertEqual(drop_in.read_text().splitlines()[1:], [
+            "Host github.com", "    User git", "    IdentityFile ~/.ssh/" + name,
+            "    IdentitiesOnly yes", "    IdentityAgent none"])
+        self.assertEqual(stat.S_IMODE(drop_in.stat().st_mode), 0o600)
+        self.assertEqual((ssh / "config").read_text(),
+                         "Include config.d/*.conf\n\nHost *\n    ServerAliveInterval 60\n")
+        self.assertEqual(stat.S_IMODE((ssh / "config").stat().st_mode), 0o640)
+        self.assertEqual(self.session.ssh_entries()[0]["hostState"], "on")
+        # Once is enough.
+        self.run_op(self.session.ssh_host(name, True))
+        self.assertEqual((ssh / "config").read_text().count("Include"), 1)
+        # Removing the copy takes its line, and the drop-in with its last key.
+        self.run_op(self.session.ssh_remove(name))
+        self.assertFalse(drop_in.exists())
+
+    def test_host_drop_ins_never_take_over_other_files(self):
+        name = "id_ed25519_sk_rk_github.com"
+        ssh = self.ssh_key(name, "ssh:github.com")
+        (ssh / "config.d").mkdir()
+        drop_in = ssh / "config.d" / "github.com.conf"
+        drop_in.write_text("Host github.com\n    User git\n")
+        self.registered()
+        self.assertEqual(self.session.ssh_entries()[0]["hostState"], "foreign")
+        self.run_op(self.session.ssh_host(name, True))
+        self.assertEqual(self.last("error")["code"], "ssh-config-foreign")
+        self.assertEqual(drop_in.read_text(), "Host github.com\n    User git\n")
+        # Removing the copy leaves that file alone too.
+        self.run_op(self.session.ssh_remove(name))
+        self.assertEqual(self.last("done")["op"], "ssh.remove")
+        self.assertEqual(drop_in.read_text(), "Host github.com\n    User git\n")
+
+    def test_host_refuses_a_symlinked_config(self):
+        name = "id_ed25519_sk_rk_github.com"
+        ssh = self.ssh_key(name, "ssh:github.com")
+        (ssh / "real-config").write_text("")
+        (ssh / "config").symlink_to("real-config")
+        self.registered()
+        self.run_op(self.session.ssh_host(name, True))
+        self.assertEqual(self.last("error")["code"], "ssh-config-link")
+        self.assertFalse((ssh / "config.d" / "github.com.conf").exists())
+
+    def test_gpg_import_says_when_it_updated_a_key(self):
+        self.registered()
+        self.run_op(self.session.gpg_import())
+        self.assertEqual(self.last("done"), {"type": "done", "op": "gpg.import", "updated": True})
+        self.runner.answers[("gpg", "--list-keys")] = helper.Result(2, "")
+        self.run_op(self.session.gpg_import())
+        self.assertEqual(self.last("done")["updated"], False)
 
     # -- commands --------------------------------------------------------
 
