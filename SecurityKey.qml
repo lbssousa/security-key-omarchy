@@ -110,7 +110,6 @@ Item {
     root.opened = false
     root.op = ""
     root.pinOp = ""
-    pinDialog.clear()
   }
 
   function dismiss() {
@@ -201,7 +200,13 @@ Item {
       : { text: tr.t("securityKey.error.pinRequired"), tone: "info" }
     root.pinArgs = args || {}
     root.pinOp = command
-    Qt.callLater(pinDialog.focusPin)
+    Qt.callLater(root.focusPin)
+  }
+
+  // The dialog exists only while open (pinLoader): its PIN field, like any
+  // text input, watches the clipboard for as long as it exists.
+  function focusPin() {
+    if (pinLoader.item) pinLoader.item.focusPin()
   }
 
   function submitPin(pin) {
@@ -238,7 +243,6 @@ Item {
     selectTab(Model.section(root.pinOp))
     root.pinOp = ""
     root.pinArgs = {}
-    pinDialog.clear()
     Qt.callLater(function() {
       if (section.visible) section.focusAction()
       else root.refocus()
@@ -346,10 +350,10 @@ Item {
         // the dialog asks again, to replace it.
         root.pinArgs = { options: Object.assign({}, root.pinArgs.options, { replace: true }) }
         root.pinState = { text: errorText(m.code, m.detail), tone: "error" }
-        Qt.callLater(pinDialog.focusPin)
+        Qt.callLater(root.focusPin)
       } else if (inDialog) {
         root.pinState = { text: errorText(m.code, m.detail), tone: "error" }
-        Qt.callLater(pinDialog.focusPin)
+        Qt.callLater(root.focusPin)
       } else if (section !== "") {
         setStatus(section, errorText(m.code, m.detail), "error")
       }
@@ -797,29 +801,36 @@ Item {
         visible: root.pinOp !== ""
         color: Commons.Color.polkit.scrim
 
-        MouseArea { anchors.fill: parent; onClicked: pinDialog.focusPin() }
+        MouseArea { anchors.fill: parent; onClicked: root.focusPin() }
 
-        PinDialog {
-          id: pinDialog
+        Loader {
+          id: pinLoader
           width: Math.min(Style.space(380), parent.width - Style.gapsOut * 2)
           anchors.centerIn: parent
-          color: root.background
-          borderSpec: root.borderSpec
-          strings: tr
-          glyph: root.pinOp === "ssh.delete" ? "󰆴" : Model.section(root.pinOp) === "ssh" ? "󰣀" : "󰌆"
-          title: root.pinOp === "ssh.create" ? tr.t("securityKey.ssh.createTitle")
-            : Model.section(root.pinOp) === "ssh" ? tr.t("securityKey.ssh.title") : tr.t("securityKey.fido.title")
-          actionText: root.pinActionText()
-          message: root.pinState.text
-          tone: root.pinState.tone
-          running: root.busy
-          pinRetries: root.device && root.device.pinRetries !== undefined ? root.device.pinRetries : -1
-          fontFamily: root.fontFamily
-          foreground: root.foreground
-          accent: root.accent
-          urgent: root.urgent
-          onSubmitted: function(pin) { root.submitPin(pin) }
-          onCancelRequested: root.busy ? root.cancel() : root.closePin()
+          active: root.pinOp !== ""
+
+          sourceComponent: Component {
+            PinDialog {
+              width: pinLoader.width
+              color: root.background
+              borderSpec: root.borderSpec
+              strings: tr
+              glyph: root.pinOp === "ssh.delete" ? "󰆴" : Model.section(root.pinOp) === "ssh" ? "󰣀" : "󰌆"
+              title: root.pinOp === "ssh.create" ? tr.t("securityKey.ssh.createTitle")
+                : Model.section(root.pinOp) === "ssh" ? tr.t("securityKey.ssh.title") : tr.t("securityKey.fido.title")
+              actionText: root.pinActionText()
+              message: root.pinState.text
+              tone: root.pinState.tone
+              running: root.busy
+              pinRetries: root.device && root.device.pinRetries !== undefined ? root.device.pinRetries : -1
+              fontFamily: root.fontFamily
+              foreground: root.foreground
+              accent: root.accent
+              urgent: root.urgent
+              onSubmitted: function(pin) { root.submitPin(pin) }
+              onCancelRequested: root.busy ? root.cancel() : root.closePin()
+            }
+          }
         }
       }
     }
