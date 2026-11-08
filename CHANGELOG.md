@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.7.0 (unreleased)
+## 0.7.0 (2026-11-07)
 
 - **Connection reuse** for the git hosts set up in `~/.ssh/config.d`, as in
   omarchy-yubikey. Setting a host up asks for the minutes, from 0 to 1440:
