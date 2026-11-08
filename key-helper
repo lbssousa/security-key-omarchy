@@ -33,7 +33,7 @@ Commands:
   {"cmd":"ssh.delete","name":"…","pin":"…"}
                                        (that key off the security key, for good,
                                           by the key handle of its copy; then the copy)
-  {"cmd":"ssh.host","name":"…","enable":true|false}
+  {"cmd":"ssh.host","name":"…","enable":true|false,"minutes":0..1440 (optional)}
                                        (its line in ~/.ssh/config.d/<host>.conf)
   {"cmd":"ssh.persist","name":"…","minutes":0..1440}
                                        (connection reuse for that host: 0, the
@@ -663,7 +663,9 @@ class Session:
         elif name == "ssh.delete" and isinstance(command.get("name"), str):
             self.start(name, self.ssh_delete(command["name"], pin))
         elif name == "ssh.host" and isinstance(command.get("name"), str) and isinstance(command.get("enable"), bool):
-            self.start(name, self.ssh_host(command["name"], command["enable"]))
+            minutes = command.get("minutes")
+            self.start(name, self.ssh_host(command["name"], command["enable"],
+                                           minutes if type(minutes) is int else None))
         elif name == "ssh.persist" and isinstance(command.get("name"), str) and type(command.get("minutes")) is int:
             self.start(name, self.ssh_persist(command["name"], command["minutes"]))
 
@@ -1362,17 +1364,22 @@ class Session:
         self.emit({"type": "done", "op": op, "name": name})
         await self.emit_state()
 
-    async def ssh_host(self, name, enable):
+    async def ssh_host(self, name, enable, minutes=None):
         """Adds <name> to the drop-in of the git host its application names, or
         takes it out (the drop-in goes with its last key); the drop-in uses the
-        keys for that host without the SSH agent."""
+        keys for that host without the SSH agent. <minutes>, when given, sets
+        the host's connection reuse too, as omarchy-yubikey asks for it when
+        it sets a host up."""
         op = "ssh.host"
+        if minutes is not None and not valid_minutes(minutes):
+            self.fail(op, "ssh-invalid", "minutes")
+            return
         entry = next((e for e in self.ssh_entries() if e["name"] == name), None)
         if entry is None or not entry["host"]:
             self.fail(op, "generic", name)
             return
         try:
-            change = self.plan_host(name, git_remote(entry["application"]), enable)
+            change = self.plan_host(name, git_remote(entry["application"]), enable, minutes)
             if enable:
                 self.ensure_include()
             self.apply_host(change)

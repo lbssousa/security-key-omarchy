@@ -150,8 +150,10 @@ Host github.com
     IdentityAgent none
 ```
 
-**Connection reuse**, as in omarchy-yubikey: once a host is set up, its
-*Reuse connections* button sets for how many minutes ssh keeps an
+**Connection reuse**, as in omarchy-yubikey. Setting a host up asks for it:
+*Use for <host>* opens the minutes, and so does importing or creating a key
+whose host isn't set up yet. Afterwards, the host's *Reuse connections*
+button changes them. They set for how many minutes ssh keeps an
 authenticated connection open for later ones to reuse, from 0 to 1440 (24
 hours). The default, 0, authenticates every new connection and writes
 `ControlMaster no`, `ControlPath none` and `ControlPersist no`, which also

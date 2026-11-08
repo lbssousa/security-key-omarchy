@@ -40,6 +40,9 @@ Section {
   signal deleteRequested(string name)
   signal hostRequested(string name, bool enable)
   signal persistRequested(string name, int minutes)
+  // Sets the host up with its connection reuse, as omarchy-yubikey asks for
+  // both together.
+  signal hostEnableRequested(string name, int minutes)
   signal cancelRequested()
 
   function t(key, fallback) { return ssh.strings ? ssh.strings.t(key, fallback) : (fallback || key) }
@@ -68,8 +71,10 @@ Section {
     else if (importButton.visible) importButton.forceActiveFocus()
   }
 
-  // The key whose host's connection reuse is being changed, or "". Its
-  // number field exists only meanwhile (a text input watches the clipboard).
+  // The key whose host is being set up, or whose connection reuse is being
+  // changed, or "". Its number field exists only meanwhile (a text input
+  // watches the clipboard). SecurityKey.qml opens it after an import or a new
+  // key whose host isn't set up yet.
   property string persistEditing: ""
 
   function persistText(minutes) {
@@ -227,7 +232,10 @@ Section {
             foreground: ssh.foreground
             accent: ssh.accent
             fontFamily: ssh.fontFamily
-            onClicked: ssh.hostRequested(row.modelData.name, row.modelData.hostState !== "on")
+            selected: row.modelData.hostState === "off" && ssh.persistEditing === row.modelData.name
+            // Setting up asks for the minutes first; stopping is immediate.
+            onClicked: row.modelData.hostState === "on" ? ssh.hostRequested(row.modelData.name, false)
+              : (ssh.persistEditing = ssh.persistEditing === row.modelData.name ? "" : row.modelData.name)
           }
 
           Button {
@@ -249,7 +257,8 @@ Section {
         // offers it: whole minutes from 0 (the default) to 1440.
         Loader {
           width: parent.width
-          active: ssh.persistEditing === row.modelData.name && row.modelData.hostState === "on"
+          active: ssh.persistEditing === row.modelData.name
+            && (row.modelData.hostState === "on" || row.modelData.hostState === "off")
           visible: active
 
           sourceComponent: Component {
@@ -263,7 +272,9 @@ Section {
               }
 
               function apply() {
-                if (!ssh.busy) ssh.persistRequested(row.modelData.name, minutes())
+                if (ssh.busy) return
+                if (row.modelData.hostState === "on") ssh.persistRequested(row.modelData.name, minutes())
+                else ssh.hostEnableRequested(row.modelData.name, minutes())
               }
 
               NumberField {
@@ -300,8 +311,9 @@ Section {
                   focusable: true
                   bordered: true
                   enabled: !ssh.busy
-                  iconText: "󰄬"
-                  text: Model.shortcut(ssh.t("securityKey.ssh.apply"), "Enter")
+                  iconText: row.modelData.hostState === "on" ? "󰄬" : "󰒓"
+                  text: Model.shortcut(row.modelData.hostState === "on" ? ssh.t("securityKey.ssh.apply")
+                    : ssh.t("securityKey.ssh.hostEnable", "Use for %1").arg(row.modelData.host), "Enter")
                   foreground: ssh.foreground
                   accent: ssh.accent
                   fontFamily: ssh.fontFamily

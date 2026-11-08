@@ -3,8 +3,10 @@
 ## 0.7.0 (unreleased)
 
 - **Connection reuse** for the git hosts set up in `~/.ssh/config.d`, as in
-  omarchy-yubikey. A host's *Reuse connections* button sets the minutes, from
-  0 to 1440. The default, 0, authenticates every new connection (and turns
+  omarchy-yubikey. Setting a host up asks for the minutes, from 0 to 1440:
+  *Use for <host>* opens them, and so does importing or creating a key whose
+  host isn't set up yet. A configured host's *Reuse connections* button
+  changes them. The default, 0, authenticates every new connection (and turns
   inherited multiplexing off). More than 0 keeps the authenticated connection
   that long (`ControlMaster auto`, `ControlPersist`, a socket in the private
   `~/.ssh/security-key/control`). The host's file keeps the setting when keys

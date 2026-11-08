@@ -786,6 +786,15 @@ class SessionTest(unittest.TestCase):
         self.run_op(self.session.ssh_persist(name, 1440))
         self.assertIn("    ControlPersist 1440m", drop_in.read_text().splitlines())
 
+    def test_setting_a_host_up_with_its_minutes(self):
+        name = "id_ed25519_sk_rk_github.com"
+        ssh = self.ssh_key(name, "ssh:github.com")
+        self.registered()
+        self.run_op(self.session.ssh_host(name, True, 20))
+        self.assertIn("    ControlPersist 20m", (ssh / "config.d" / "github.com.conf").read_text().splitlines())
+        self.run_op(self.session.ssh_host(name, True, 1441))
+        self.assertEqual(self.last("error")["code"], "ssh-invalid")
+
     def test_connection_reuse_bounds_and_keys_without_a_host(self):
         name = "id_ed25519_sk_rk_github.com"
         self.ssh_key(name, "ssh:github.com")
