@@ -81,6 +81,8 @@ Item {
   readonly property var tabs: root.loaded && !root.helperLost
     ? Model.tabs(root.devices, root.credentials, root.card, root.sshKeys) : []
   readonly property string tab: Model.currentTab(root.tabs, root.chosenTab)
+  // Also when the SSH tab goes away by itself (the key pulled out).
+  onTabChanged: if (root.tab !== "ssh") closeForms()
 
   // The last outcome, per section.
   property var status: ({ fido: null, gpg: null, ssh: null })
@@ -113,6 +115,15 @@ Item {
     root.opened = false
     root.op = ""
     root.pinOp = ""
+    closeForms()
+  }
+
+  // The SSH tab's form and minutes editor hold text inputs, which read every
+  // clipboard offer for as long as they exist: they close with their tab and
+  // with the overlay, never kept hidden.
+  function closeForms() {
+    root.sshCreating = false
+    sshSection.persistEditing = ""
   }
 
   function dismiss() {
@@ -142,6 +153,7 @@ Item {
     if (root.tabs.indexOf(name) < 0 || name === root.tab) return
     root.chosenTab = name
     root.pendingRemove = ""
+    closeForms()
     scroller.scrollTo(0)
   }
 

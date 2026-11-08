@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.1 (2026-11-07)
+
+- The SSH tab's new-key form and the minutes editor close when another tab is
+  shown, when the SSH tab goes away (the key pulled out) and when the overlay
+  closes. Their loaders are also inactive while the tab is hidden. Before,
+  switching tabs or closing the overlay with the form open kept its three text
+  fields alive and hidden, still reading every clipboard offer (0.6.1 had
+  fixed the PIN dialog only). Found in the Omarchy plugin marketplace's
+  review.
+
 ## 0.7.0 (2026-11-07)
 
 - **Connection reuse** for the git hosts set up in `~/.ssh/config.d`, as in
