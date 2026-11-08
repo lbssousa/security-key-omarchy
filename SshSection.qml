@@ -257,7 +257,8 @@ Section {
         // offers it: whole minutes from 0 (the default) to 1440.
         Loader {
           width: parent.width
-          active: ssh.persistEditing === row.modelData.name
+          // Never while hidden: SecurityKey.qml closes it with the tab too.
+          active: ssh.visible && ssh.persistEditing === row.modelData.name
             && (row.modelData.hostState === "on" || row.modelData.hostState === "off")
           visible: active
 
@@ -404,7 +405,8 @@ Section {
   Loader {
     id: createLoader
     width: parent.width
-    active: ssh.creating
+    // Never while hidden: SecurityKey.qml closes the form with the tab too.
+    active: ssh.creating && ssh.visible
     visible: active
 
     sourceComponent: Component {
