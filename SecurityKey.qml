@@ -758,6 +758,7 @@ Item {
                 present: root.sshKeys
                 defaults: root.sshDefaults
                 creating: root.sshCreating
+                covered: root.pinOp !== ""
                 created: root.sshCreated
                 pending: root.pendingRemove
                 busy: root.busy

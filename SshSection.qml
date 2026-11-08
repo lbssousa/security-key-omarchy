@@ -28,6 +28,11 @@ Section {
   property string pending: ""
   property bool busy: false
   property bool running: false
+  // The PIN dialog is over the card. No text input lives behind it: the
+  // form, the minutes editor and the public key go meanwhile (a text input
+  // watches the clipboard for as long as it exists) and come back once it
+  // closes, the form with what it held (form*).
+  property bool covered: false
   property string statusText: ""
   property string statusTone: "info"
   property color urgent: Commons.Color.urgent
@@ -258,7 +263,7 @@ Section {
         Loader {
           width: parent.width
           // Never while hidden: SecurityKey.qml closes it with the tab too.
-          active: ssh.visible && ssh.persistEditing === row.modelData.name
+          active: ssh.visible && !ssh.covered && ssh.persistEditing === row.modelData.name
             && (row.modelData.hostState === "on" || row.modelData.hostState === "off")
           visible: active
 
@@ -371,7 +376,7 @@ Section {
     // Read-only, and created only while there is a key to show.
     Loader {
       width: parent.width
-      active: !ssh.creating && !!ssh.created
+      active: ssh.visible && !ssh.covered && !ssh.creating && !!ssh.created
 
       sourceComponent: Component {
         TextEdit {
@@ -406,7 +411,7 @@ Section {
     id: createLoader
     width: parent.width
     // Never while hidden: SecurityKey.qml closes the form with the tab too.
-    active: ssh.creating && ssh.visible
+    active: ssh.creating && ssh.visible && !ssh.covered
     visible: active
 
     sourceComponent: Component {

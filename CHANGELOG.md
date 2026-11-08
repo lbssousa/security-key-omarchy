@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.3 (2026-11-08)
+
+- No text input lives behind the PIN dialog. While it is open, the SSH tab's
+  new-key form, the minutes editor and the public key of the key just made
+  go, and come back when it closes, the form with what it held. Before, the
+  form's three text fields stayed alive under the dialog while a new key was
+  made, still reading every clipboard offer. Found in the Omarchy plugin
+  marketplace's review.
+
 ## 0.7.2 (2026-11-07)
 
 - The PIN dialog's field exists only while the PIN can be typed. Before, it
