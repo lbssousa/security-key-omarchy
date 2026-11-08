@@ -150,6 +150,20 @@ Host github.com
     IdentityAgent none
 ```
 
+**Connection reuse**, as in omarchy-yubikey. Setting a host up asks for it:
+*Use for <host>* opens the minutes, and so does importing or creating a key
+whose host isn't set up yet. Afterwards, the host's *Reuse connections*
+button changes them. They set for how many minutes ssh keeps an
+authenticated connection open for later ones to reuse, from 0 to 1440 (24
+hours). The default, 0, authenticates every new connection and writes
+`ControlMaster no`, `ControlPath none` and `ControlPersist no`, which also
+turns off any multiplexing inherited from elsewhere in the configuration. A
+positive value writes `ControlMaster auto`, `ControlPersist <minutes>m` and a
+`ControlPath` in the private `~/.ssh/security-key/control`. For that long, new
+connections to the host need no PIN or touch, and removing the copy or
+deleting the key doesn't close an open one. The setting belongs to the host's
+file, so it covers every key for that host.
+
 One file per host lists every key for it, and it adds `Include
 config.d/*.conf` at the top of `~/.ssh/config` once, unless the file already
 includes `config.d`. The overlay only ever changes the files it wrote

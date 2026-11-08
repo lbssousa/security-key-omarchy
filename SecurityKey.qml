@@ -58,6 +58,9 @@ Item {
   // The form for a new SSH key is open, and the key it made last.
   property bool sshCreating: false
   property var sshCreated: null
+  // Keys just imported or made: the first whose git host isn't set up yet
+  // gets the host's setup, minutes included, opened once the state arrives.
+  property var sshOfferHost: []
 
   // The command running in the helper ("fido.register", "gpg.import", …).
   property string op: ""
@@ -310,6 +313,11 @@ Item {
       root.sshKeys = list(m.sshKeys)
       if (m.sshDefaults) root.sshDefaults = { user: String(m.sshDefaults.user || ""), comment: String(m.sshDefaults.comment || "") }
       if (root.sshCreated && !Model.hasSshKey(root.sshKeys, root.sshCreated.name)) root.sshCreated = null
+      if (root.sshOfferHost.length > 0) {
+        var offer = root.sshKeys.filter(function(k) { return root.sshOfferHost.indexOf(k.name) >= 0 && k.hostState === "off" })
+        root.sshOfferHost = []
+        if (offer.length > 0) sshSection.persistEditing = offer[0].name
+      }
       checkPending()
       if (root.pinOp !== "" && !root.busy && root.device === null) closePin()
     } else if (m.type === "busy") {
@@ -327,16 +335,27 @@ Item {
       else if (m.op === "gpg.remove") setStatus("gpg", tr.t("securityKey.gpg.removed"), "info")
       else if (m.op === "ssh.remove") setStatus("ssh", tr.t("securityKey.ssh.removed", "Removed from ~/.ssh: %1").arg(Model.ltr(String(m.name || ""))), "info")
       else if (m.op === "ssh.delete") setStatus("ssh", tr.t("securityKey.ssh.deleted", "Deleted from the security key, with its copy: %1").arg(Model.ltr(String(m.name || ""))), "info")
-      else if (m.op === "ssh.host") setStatus("ssh", (m.enabled ? tr.t("securityKey.ssh.hostEnabled", "ssh now uses this key for %1.")
+      else if (m.op === "ssh.host") {
+        sshSection.persistEditing = ""
+        setStatus("ssh", (m.enabled ? tr.t("securityKey.ssh.hostEnabled", "ssh now uses this key for %1.")
                                                                 : tr.t("securityKey.ssh.hostDisabled", "ssh no longer uses this key for %1.")).arg(String(m.host || "")), "success")
+      }
+      else if (m.op === "ssh.persist") {
+        sshSection.persistEditing = ""
+        setStatus("ssh", (m.minutes > 0 ? tr.t("securityKey.ssh.persistSet", "Connections to %1 are reused for %2 minutes.")
+                                          : tr.t("securityKey.ssh.persistNone", "Each new connection to %1 authenticates again."))
+                           .arg(String(m.host || "")).arg(Commons.I18n.formatNumber(m.minutes || 0)), "success")
+      }
       else if (m.op === "ssh.create") {
         root.sshCreating = false
         root.sshCreated = { name: String(m.name || ""), publicKey: String(m.publicKey || "") }
+        root.sshOfferHost = m.host ? [String(m.name || "")] : []
         setStatus("ssh", m.host ? tr.t("securityKey.ssh.hostSuggest", "Its button \"Use for %1\" sets ssh up for that host.").arg(String(m.host)) : "", "info")
       }
       else if (m.op === "ssh.import") {
         var lines = []
         var imported = list(m.imported)
+        root.sshOfferHost = imported
         var skipped = list(m.skipped)
         if (imported.length > 0) lines.push(tr.t("securityKey.ssh.imported", "Imported: %1").arg(imported.map(Model.ltr).join(", ")))
         if (skipped.length > 0) lines.push(tr.t("securityKey.ssh.skipped", "Already in ~/.ssh, left alone: %1").arg(skipped.map(Model.ltr).join(", ")))
@@ -369,7 +388,8 @@ Item {
   // only while its button would, and shows its tab first. Returns whether
   // the key was one of them.
   function altKey(key) {
-    if (!root.opened || !root.loaded || root.helperLost || root.busy || root.pinOp !== "" || root.sshCreating) return false
+    if (!root.opened || !root.loaded || root.helperLost || root.busy || root.pinOp !== "" || root.sshCreating
+        || sshSection.persistEditing !== "") return false
     var has = function(name) { return root.tabs.indexOf(name) >= 0 }
     if (key === Qt.Key_R && has("fido") && root.device !== null && Model.canRegister(root.target) && !Model.needsPin(root.pinRequired, root.device)) {
       selectTab("fido")
@@ -451,6 +471,7 @@ Item {
           if (root.busy) root.cancel()
           else if (root.pendingRemove !== "") root.pendingRemove = ""
           else if (root.sshCreating) root.closeCreate()
+          else if (sshSection.persistEditing !== "") sshSection.persistEditing = ""
           else root.dismiss()
           event.accepted = true
         } else if (event.key === Qt.Key_F5) {
@@ -728,7 +749,7 @@ Item {
                 created: root.sshCreated
                 pending: root.pendingRemove
                 busy: root.busy
-                running: Model.section(root.op) === "ssh" && root.op !== "ssh.remove" && root.op !== "ssh.host" && root.pinOp === ""
+                running: Model.section(root.op) === "ssh" && ["ssh.remove", "ssh.host", "ssh.persist"].indexOf(root.op) < 0 && root.pinOp === ""
                 statusText: root.statusOf("ssh").text
                 statusTone: root.statusOf("ssh").tone
                 fontFamily: root.fontFamily
@@ -745,6 +766,8 @@ Item {
                   if (root.pendingRemove !== "") sshSection.focusDelete(name)
                 }
                 onHostRequested: function(name, enable) { root.run({ cmd: "ssh.host", name: name, enable: enable }) }
+                onPersistRequested: function(name, minutes) { root.run({ cmd: "ssh.persist", name: name, minutes: minutes }) }
+                onHostEnableRequested: function(name, minutes) { root.run({ cmd: "ssh.host", name: name, enable: true, minutes: minutes }) }
                 onCancelRequested: root.cancel()
               }
             }

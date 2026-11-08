@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.0 (2026-11-07)
+
+- **Connection reuse** for the git hosts set up in `~/.ssh/config.d`, as in
+  omarchy-yubikey. Setting a host up asks for the minutes, from 0 to 1440:
+  *Use for <host>* opens them, and so does importing or creating a key whose
+  host isn't set up yet. A configured host's *Reuse connections* button
+  changes them. The default, 0, authenticates every new connection (and turns
+  inherited multiplexing off). More than 0 keeps the authenticated connection
+  that long (`ControlMaster auto`, `ControlPersist`, a socket in the private
+  `~/.ssh/security-key/control`). The host's file keeps the setting when keys
+  join or leave it. Files written by 0.6, without these lines, are still the
+  overlay's and count as 0.
+- The minutes field exists only while it is being edited, like the other text
+  fields.
+
 ## 0.6.1 (2026-11-07)
 
 - The PIN dialog and the new SSH key form create their text fields only while

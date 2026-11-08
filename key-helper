@@ -33,8 +33,11 @@ Commands:
   {"cmd":"ssh.delete","name":"…","pin":"…"}
                                        (that key off the security key, for good,
                                           by the key handle of its copy; then the copy)
-  {"cmd":"ssh.host","name":"…","enable":true|false}
+  {"cmd":"ssh.host","name":"…","enable":true|false,"minutes":0..1440 (optional)}
                                        (its line in ~/.ssh/config.d/<host>.conf)
+  {"cmd":"ssh.persist","name":"…","minutes":0..1440}
+                                       (connection reuse for that host: 0, the
+                                          default, authenticates each connection)
   {"cmd":"cancel"}
 
 Events:
@@ -45,7 +48,8 @@ Events:
    "sharedCount",
    "card":null|{"vendor","serial","holder","url","fingerprints"},
    "keyState":"none"|"missing"|"public"|"ready","trusted",
-   "sshKeys":[{"name","application","host","hostState":""|"on"|"off"|"edited"|"foreign"}],
+   "sshKeys":[{"name","application","host","hostState":""|"on"|"off"|"edited"|"foreign",
+               "persistMinutes"}],
    "sshDefaults":{"user","comment"}}
   {"type":"busy","op","stage"}          (stage "touch" while waiting for a touch,
                                           "auth" while polkit asks for the password)
@@ -55,7 +59,8 @@ Events:
                                           "imported"/"skipped", ssh.remove and
                                           ssh.delete with "name", ssh.create with
                                           "name"/"host"/"publicKey", ssh.host
-                                          with "name"/"host"/"enabled")
+                                          with "name"/"host"/"enabled", ssh.persist
+                                          with "name"/"host"/"minutes")
   {"type":"error","op","code","detail"}
   {"type":"cancelled","op"}
 
@@ -117,6 +122,12 @@ GIT_HOSTS = {"github.com", "gitlab.com", "bitbucket.org", "codeberg.org", "git.s
 DROP_IN_MARKER = "# Written by the security-key overlay (lbssousa.security-key); remove this line to keep your edits."
 IDENTITY = "    IdentityFile ~/.ssh/"
 SSH_INCLUDE = "Include config.d/*.conf"
+# Connection reuse per git host, as omarchy-yubikey offers it: 0 (the default)
+# authenticates every new connection; up to 1440 minutes keeps a master
+# connection that later ones reuse without the PIN or a touch.
+CONTROL_PERSIST_MINUTES = 0
+MAX_PERSIST_MINUTES = 1440
+CONTROL_DIR = "security-key/control"
 
 # libfido2's error names, as pamu2fcfg and ssh-keygen print them, to the
 # codes the overlay explains.
@@ -443,24 +454,38 @@ def git_remote(application):
     return match["login"] or "git", host, str(int(port)) if port else ""
 
 
-def drop_in_text(names, remote):
+def drop_in_text(names, remote, minutes=CONTROL_PERSIST_MINUTES):
+    """The drop-in for <remote>'s keys. With 0 minutes, multiplexing is off
+    explicitly (ControlMaster no alone could still reuse a master at an
+    inherited ControlPath). None is how 0.6 wrote it, without those lines."""
     login, host, port = remote
     lines = [DROP_IN_MARKER, "Host " + host, "    User " + login]
     if port:
         lines.append("    Port " + port)
     lines += [IDENTITY + name for name in sorted(names)]
     lines += ["    IdentitiesOnly yes", "    IdentityAgent none"]
+    if minutes:
+        lines += ["    ControlMaster auto", "    ControlPath ~/.ssh/" + CONTROL_DIR + "/%C",
+                  "    ControlPersist " + str(minutes) + "m"]
+    elif minutes is not None:
+        lines += ["    ControlMaster no", "    ControlPath none", "    ControlPersist no"]
     return "\n".join(lines) + "\n"
 
 
+def valid_minutes(value):
+    return type(value) is int and 0 <= value <= MAX_PERSIST_MINUTES
+
+
 def parse_drop_in(text):
-    """A drop-in this helper wrote: ("ours", names, remote); ("edited", …) when
-    it was changed since; ("foreign", [], None) when it isn't one of ours."""
+    """A drop-in this helper wrote: ("ours", names, remote, minutes); ("edited",
+    …) when it was changed since; ("foreign", [], None, None) when it isn't one
+    of ours. minutes is None for a drop-in from 0.6, without Control lines."""
     lines = text.splitlines()
     if not lines or lines[0] != DROP_IN_MARKER:
-        return "foreign", [], None
+        return "foreign", [], None, None
     login = host = port = ""
     names = []
+    minutes = None
     for line in lines[1:]:
         if line.startswith("Host "):
             host = line[5:]
@@ -470,10 +495,15 @@ def parse_drop_in(text):
             port = line[9:]
         elif line.startswith(IDENTITY):
             names.append(line[len(IDENTITY):])
+        elif line.startswith("    ControlPersist "):
+            value = line[len("    ControlPersist "):]
+            match = re.fullmatch(r"([1-9][0-9]{0,3})m", value)
+            minutes = 0 if value == "no" else int(match[1]) if match else -1
     remote = (login, host, port)
-    if not host or not login or drop_in_text(names, remote) != text:
-        return "edited", names, remote
-    return "ours", names, remote
+    if (not host or not login or (minutes is not None and not valid_minutes(minutes))
+            or drop_in_text(names, remote, minutes) != text):
+        return "edited", names, remote, None
+    return "ours", names, remote, minutes
 
 
 def includes_drop_ins(config):
@@ -633,7 +663,11 @@ class Session:
         elif name == "ssh.delete" and isinstance(command.get("name"), str):
             self.start(name, self.ssh_delete(command["name"], pin))
         elif name == "ssh.host" and isinstance(command.get("name"), str) and isinstance(command.get("enable"), bool):
-            self.start(name, self.ssh_host(command["name"], command["enable"]))
+            minutes = command.get("minutes")
+            self.start(name, self.ssh_host(command["name"], command["enable"],
+                                           minutes if type(minutes) is int else None))
+        elif name == "ssh.persist" and isinstance(command.get("name"), str) and type(command.get("minutes")) is int:
+            self.start(name, self.ssh_persist(command["name"], command["minutes"]))
 
     def start(self, op, coroutine):
         if self.op == "refresh" and op != "refresh" and self.queued is None and not self.closed:
@@ -819,19 +853,20 @@ class Session:
             return None
 
     def drop_in(self, host):
-        """What ~/.ssh/config.d/<host>.conf is: ("missing", [], None) or parse_drop_in()."""
+        """What ~/.ssh/config.d/<host>.conf is: ("missing", [], None, None) or parse_drop_in()."""
         try:
             text = self.read_ssh(os.path.join("config.d", host + ".conf"))
         except FileNotFoundError:
-            return "missing", [], None
+            return "missing", [], None, None
         except (OSError, ValueError, UnicodeError):
-            return "foreign", [], None
+            return "foreign", [], None, None
         return parse_drop_in(text)
 
     def ssh_entries(self):
         """The resident keys in ~/.ssh, with the git host their application names
         and whether its drop-in uses them: hostState "on", "off", "edited" (the
-        drop-in changed by hand) or "foreign" (a file this helper didn't write)."""
+        drop-in changed by hand) or "foreign" (a file this helper didn't write),
+        and the minutes it keeps connections to that host for (0 when none)."""
         config = self.ssh_config_text()
         included = config is not None and includes_drop_ins(config)
         entries = []
@@ -841,12 +876,15 @@ class Session:
             remote = git_remote(application)
             host = remote[1] if remote else ""
             state = ""
+            minutes = CONTROL_PERSIST_MINUTES
             if remote:
-                kind, names, _ = self.drop_in(host)
+                kind, names, _, found = self.drop_in(host)
                 state = {"missing": "off", "edited": "edited", "foreign": "foreign"}.get(kind)
                 if kind == "ours":
                     state = "on" if name in names and included else "off"
-            entries.append({"name": name, "application": application, "host": host, "hostState": state})
+                    minutes = found or 0
+            entries.append({"name": name, "application": application, "host": host, "hostState": state,
+                            "persistMinutes": minutes})
         return entries
 
     def ssh_defaults(self):
@@ -856,17 +894,19 @@ class Session:
         user = re.sub(r"[^A-Za-z0-9._-]", "", self.user) or "user"
         return {"user": secrets.token_hex(8), "comment": user + "@" + hostname}
 
-    def plan_host(self, name, remote, enable):
+    def plan_host(self, name, remote, enable, minutes=None):
         """The change to remote's drop-in that adds or takes out <name>: (path,
-        text, or None to delete it), or None when nothing changes. Raises
-        SshConfigError when the drop-in isn't the helper's to change."""
+        text, or None to delete it), or None when nothing changes. <minutes>
+        sets the host's connection reuse; otherwise the drop-in keeps its own.
+        Raises SshConfigError when the drop-in isn't the helper's to change."""
         host = remote[1]
-        kind, names, current = self.drop_in(host)
+        kind, names, current, kept = self.drop_in(host)
         path = os.path.join(self.paths.ssh, "config.d", host + ".conf")
+        minutes = kept or CONTROL_PERSIST_MINUTES if minutes is None else minutes
         if not enable:
             if kind == "ours" and name in names:
                 rest = [n for n in names if n != name]
-                return path, drop_in_text(rest, current) if rest else None
+                return path, drop_in_text(rest, current, minutes) if rest else None
             if kind == "edited" and name in names:
                 raise SshConfigError("ssh-config-edited", "~/.ssh/config.d/" + host + ".conf")
             return None
@@ -877,9 +917,10 @@ class Session:
         if kind == "ours" and tuple(current) != tuple(remote):
             # Another key names the same host with another login or port.
             raise SshConfigError("ssh-config-conflict", host)
-        if kind == "ours" and name in names:
+        text = drop_in_text(sorted(set(names) | {name}), remote, minutes)
+        if kind == "ours" and name in names and text == drop_in_text(names, current, kept):
             return None
-        return path, drop_in_text(sorted(set(names) | {name}), remote)
+        return path, text
 
     def apply_host(self, change):
         if change is None:
@@ -893,6 +934,13 @@ class Session:
         os.makedirs(directory, mode=0o700, exist_ok=True)
         if os.path.islink(directory) or not os.path.isdir(directory):
             raise SshConfigError("ssh-config-foreign", "~/.ssh/config.d")
+        if "    ControlMaster auto\n" in text:
+            # The master connections' sockets: private, as ssh requires.
+            control = os.path.join(self.paths.ssh, CONTROL_DIR)
+            os.makedirs(control, mode=0o700, exist_ok=True)
+            if os.path.islink(control) or not os.path.isdir(control):
+                raise SshConfigError("ssh-config-foreign", "~/.ssh/" + CONTROL_DIR)
+            os.chmod(control, 0o700)
         replace_file(path, text, 0o600)
 
     def ensure_include(self):
@@ -1316,17 +1364,22 @@ class Session:
         self.emit({"type": "done", "op": op, "name": name})
         await self.emit_state()
 
-    async def ssh_host(self, name, enable):
+    async def ssh_host(self, name, enable, minutes=None):
         """Adds <name> to the drop-in of the git host its application names, or
         takes it out (the drop-in goes with its last key); the drop-in uses the
-        keys for that host without the SSH agent."""
+        keys for that host without the SSH agent. <minutes>, when given, sets
+        the host's connection reuse too, as omarchy-yubikey asks for it when
+        it sets a host up."""
         op = "ssh.host"
+        if minutes is not None and not valid_minutes(minutes):
+            self.fail(op, "ssh-invalid", "minutes")
+            return
         entry = next((e for e in self.ssh_entries() if e["name"] == name), None)
         if entry is None or not entry["host"]:
             self.fail(op, "generic", name)
             return
         try:
-            change = self.plan_host(name, git_remote(entry["application"]), enable)
+            change = self.plan_host(name, git_remote(entry["application"]), enable, minutes)
             if enable:
                 self.ensure_include()
             self.apply_host(change)
@@ -1338,6 +1391,30 @@ class Session:
             await self.emit_state()
             return
         self.emit({"type": "done", "op": op, "name": name, "host": entry["host"], "enabled": enable})
+        await self.emit_state()
+
+    async def ssh_persist(self, name, minutes):
+        """Sets how long connections to the git host of <name>'s drop-in are
+        reused: 0 authenticates each one, up to MAX_PERSIST_MINUTES keeps the
+        authenticated master that long. The drop-in has to use the key already."""
+        op = "ssh.persist"
+        if not valid_minutes(minutes):
+            self.fail(op, "ssh-invalid", "minutes")
+            return
+        entry = next((e for e in self.ssh_entries() if e["name"] == name), None)
+        if entry is None or entry["hostState"] != "on":
+            self.fail(op, "generic", name)
+            return
+        try:
+            self.apply_host(self.plan_host(name, git_remote(entry["application"]), True, minutes))
+        except SshConfigError as e:
+            self.fail(op, e.code, e.detail)
+            return
+        except OSError as e:
+            self.fail(op, "write-failed", str(e))
+            await self.emit_state()
+            return
+        self.emit({"type": "done", "op": op, "name": name, "host": entry["host"], "minutes": minutes})
         await self.emit_state()
 
     def install_ssh_keys(self, workdir, names):
