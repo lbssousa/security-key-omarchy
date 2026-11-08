@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.2 (2026-11-07)
+
+- The PIN dialog's field exists only while the PIN can be typed. Before, it
+  was only hidden while the key waited for a touch, and a hidden text field
+  still reads every clipboard offer. Found in the Omarchy plugin
+  marketplace's review.
+
 ## 0.7.1 (2026-11-07)
 
 - The SSH tab's new-key form and the minutes editor close when another tab is

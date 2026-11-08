@@ -37,7 +37,8 @@ BorderSurface {
 
   // The PIN never outlives the command that took it.
   function submit() {
-    if (dialog.running) return
+    if (dialog.running || !pinLoader.item) return
+    var pin = pinLoader.item
     if (pin.text === "") {
       pin.forceActiveFocus()
       return
@@ -47,17 +48,19 @@ BorderSurface {
     dialog.submitted(value)
   }
 
-  // The field hides while the key waits: Cancel holds the focus meanwhile.
-  onRunningChanged: if (running && pin.activeFocus) cancelButton.forceActiveFocus()
+  // The field exists only while the PIN can be typed (pinLoader): like any
+  // text input, it reads every clipboard offer for as long as it exists, so
+  // it goes while the key waits for a touch. Cancel holds the focus meanwhile.
+  onRunningChanged: if (running) cancelButton.forceActiveFocus()
 
-  function clear() { pin.text = "" }
-  function focusPin() { pin.forceActiveFocus() }
+  function clear() { if (pinLoader.item) pinLoader.item.text = "" }
+  function focusPin() { if (pinLoader.item) pinLoader.item.forceActiveFocus() }
 
   radius: Style.cornerRadius
   padding: Style.spacing.panelPadding
   height: content.implicitHeight + contentTopInset + contentBottomInset
 
-  MouseArea { anchors.fill: parent; onClicked: if (!dialog.running) pin.forceActiveFocus() }
+  MouseArea { anchors.fill: parent; onClicked: dialog.focusPin() }
 
   Column {
     id: content
@@ -113,17 +116,26 @@ BorderSurface {
     // place (the same height, so the dialog doesn't jump).
     Item {
       width: parent.width
-      height: Math.max(pin.implicitHeight, touchLine.implicitHeight)
+      // The field's height, kept for when it's gone.
+      property real fieldHeight: 0
+      height: Math.max(fieldHeight, touchLine.implicitHeight)
 
-      PinField {
-        id: pin
+      Loader {
+        id: pinLoader
         anchors.verticalCenter: parent.verticalCenter
         width: parent.width
-        visible: !dialog.running
-        placeholderText: dialog.t("securityKey.pinPlaceholder")
-        foreground: dialog.foreground
-        accent: dialog.accent
-        onAccepted: dialog.submit()
+        active: !dialog.running
+        onLoaded: parent.fieldHeight = item.implicitHeight
+
+        sourceComponent: Component {
+          PinField {
+            width: pinLoader.width
+            placeholderText: dialog.t("securityKey.pinPlaceholder")
+            foreground: dialog.foreground
+            accent: dialog.accent
+            onAccepted: dialog.submit()
+          }
+        }
       }
 
       StatusLine {
