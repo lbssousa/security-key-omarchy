@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.4 (2026-11-10)
+
+- Restrict resident SSH key names strictly to safe characters. Resident key
+  filenames created or imported from authenticators must match
+  `^id_(?:ed25519_sk|ecdsa_sk)_rk(?:_[A-Za-z0-9._@:-]+)?$`. Before, malicious
+  or hostile authenticators with carriage returns, newlines or spaces in their
+  user IDs could produce filenames capable of injecting directives (such as
+  `ProxyCommand`) into `IdentityFile` lines in `~/.ssh/config.d/<host>.conf`.
+  Found in the Omarchy plugin marketplace's review.
+
 ## 0.7.3 (2026-11-08)
 
 - No text input lives behind the PIN dialog. While it is open, the SSH tab's

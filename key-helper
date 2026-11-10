@@ -100,7 +100,7 @@ CREATE_TIMEOUT_S = 120
 # Resident SSH keys: the names ssh-keygen gives them, the key types, and what a
 # new key's application (after "ssh:") and user ID may hold. No slashes or "..",
 # so the handle's name stays a plain file name in ~/.ssh.
-RESIDENT = re.compile(r"id_\w+_sk_rk")
+RESIDENT = re.compile(r"^id_(?:ed25519_sk|ecdsa_sk)_rk(?:_[A-Za-z0-9._@:-]+)?$")
 SSH_ALGORITHMS = {"ed25519-sk": "ed25519_sk", "ecdsa-sk": "ecdsa_sk"}
 SK_KEY_TYPES = {"sk-ssh-ed25519@openssh.com": "ed25519-sk", "sk-ecdsa-sha2-nistp256@openssh.com": "ecdsa-sk"}
 CREATE_APPLICATION = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._@:-]{0,126}[A-Za-z0-9])?")
@@ -462,7 +462,10 @@ def drop_in_text(names, remote, minutes=CONTROL_PERSIST_MINUTES):
     lines = [DROP_IN_MARKER, "Host " + host, "    User " + login]
     if port:
         lines.append("    Port " + port)
-    lines += [IDENTITY + name for name in sorted(names)]
+    for name in sorted(names):
+        if not RESIDENT.fullmatch(name):
+            raise SshConfigError("ssh-invalid", name)
+        lines.append(IDENTITY + name)
     lines += ["    IdentitiesOnly yes", "    IdentityAgent none"]
     if minutes:
         lines += ["    ControlMaster auto", "    ControlPath ~/.ssh/" + CONTROL_DIR + "/%C",
@@ -827,7 +830,7 @@ class Session:
             names = os.listdir(self.paths.ssh)
         except OSError:
             return []
-        return sorted(n for n in names if re.match(r"id_\w+_sk_rk", n) and not n.endswith(".pub"))
+        return sorted(n for n in names if RESIDENT.fullmatch(n) and not n.endswith(".pub"))
 
     def read_ssh(self, name):
         """A small file under ~/.ssh, as text, never through a symbolic link."""
@@ -1194,7 +1197,7 @@ class Session:
             self.emit({"type": "busy", "op": op, "stage": "touch"})
             result = await self.runner.run(["ssh-keygen", "-K", "-N", ""], env=env, cwd=workdir,
                                            timeout=TOUCH_TIMEOUT_S)
-            found = sorted(n for n in os.listdir(workdir) if re.match(r"id_\w+_sk_rk", n))
+            found = sorted(n for n in os.listdir(workdir) if RESIDENT.fullmatch(n))
             if result.code != 0 and not found:
                 code = "timeout" if result.err == "timeout" else fido_error(result.err, pin)
                 log("ssh-keygen -K failed:", last_line(result.err))
@@ -1423,7 +1426,7 @@ class Session:
         imported = []
         skipped = []
         for name in names:
-            if name.endswith(".pub"):
+            if name.endswith(".pub") or not RESIDENT.fullmatch(name):
                 continue
             pair = [name, name + ".pub"]
             if any(os.path.exists(os.path.join(self.paths.ssh, n)) for n in pair):

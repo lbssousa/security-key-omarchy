@@ -856,6 +856,29 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(self.last("error")["code"], "ssh-config-link")
         self.assertFalse((ssh / "config.d" / "github.com.conf").exists())
 
+    def test_malicious_resident_key_filename_injection_refused(self):
+        # Authenticator provisioned with carriage return/newline in user ID
+        bad_name = "id_ed25519_sk_rk_github.com\nProxyCommand evil"
+        ssh = self.home / ".ssh"
+        ssh.mkdir(exist_ok=True)
+        (ssh / bad_name).write_text("fake")
+        (ssh / (bad_name + ".pub")).write_text("fake.pub")
+        self.registered()
+        # ssh_keys() ignores names that do not match RESIDENT
+        self.assertNotIn(bad_name, self.session.ssh_keys())
+        self.assertNotIn(bad_name, [e["name"] for e in self.session.ssh_entries()])
+        # drop_in_text refuses the name
+        with self.assertRaises(helper.SshConfigError):
+            helper.drop_in_text([bad_name], ("git", "github.com", ""))
+        # install_ssh_keys ignores the bad key
+        workdir = self.tmp.name + "/work"
+        os.makedirs(workdir, exist_ok=True)
+        pathlib.Path(workdir, bad_name).write_text("fake")
+        pathlib.Path(workdir, bad_name + ".pub").write_text("fake.pub")
+        imported, skipped = self.session.install_ssh_keys(workdir, [bad_name])
+        self.assertEqual(imported, [])
+        self.assertEqual(skipped, [])
+
     def test_gpg_import_says_when_it_updated_a_key(self):
         self.registered()
         self.run_op(self.session.gpg_import())
