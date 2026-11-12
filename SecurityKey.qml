@@ -50,6 +50,8 @@ Item {
   property var target: ({ kind: "own", path: "" })
   property bool pinRequired: false
   property int sharedCount: 0
+  property string pinMode: ""
+  property bool pinHelper: false
   property var card: null
   property string keyState: ""
   property bool trusted: false
@@ -318,6 +320,8 @@ Item {
       root.target = m.target || ({ kind: "no-pam", path: "" })
       root.pinRequired = m.pinRequired === true
       root.sharedCount = m.sharedCount || 0
+      root.pinMode = String(m.pinMode || "")
+      root.pinHelper = m.pinHelper === true
       root.card = m.card ? { vendor: m.card.vendor, serial: m.card.serial, holder: m.card.holder,
                              url: m.card.url, fingerprints: list(m.card.fingerprints) } : null
       root.keyState = String(m.keyState || "")
@@ -342,6 +346,7 @@ Item {
     } else if (m.type === "done") {
       if (m.op === "fido.register") setStatus("fido", tr.t("securityKey.fido.registered"), "success")
       else if (m.op === "fido.remove") setStatus("fido", tr.t("securityKey.fido.removed"), "info")
+      else if (m.op === "fido.pin") setStatus("fido", tr.t("securityKey.fido.pinSaved"), "success")
       else if (m.op === "gpg.import") setStatus("gpg", tr.t(m.updated ? "securityKey.gpg.updated" : "securityKey.gpg.imported"), "success")
       else if (m.op === "gpg.trust") setStatus("gpg", tr.t("securityKey.gpg.trustedDone"), "success")
       else if (m.op === "gpg.remove") setStatus("gpg", tr.t("securityKey.gpg.removed"), "info")
@@ -711,6 +716,8 @@ Item {
                 target: root.target
                 pinRequired: root.pinRequired
                 sharedCount: root.sharedCount
+                pinMode: root.pinMode
+                pinHelper: root.pinHelper
                 busy: root.busy
                 running: Model.section(root.op) === "fido" && root.op !== "fido.remove" && root.pinOp === ""
                 pending: root.pendingRemove
@@ -723,6 +730,7 @@ Item {
                 onRegisterRequested: root.askPin("fido.register")
                 onRemoveRequested: function(index) { root.remove("fido", index) }
                 onCancelRequested: root.cancel()
+                onPinRequested: function(require) { root.run({ cmd: "fido.pin", require: require }) }
               }
 
               GpgSection {

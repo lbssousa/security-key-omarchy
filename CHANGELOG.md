@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.0 (2026-11-12)
+
+- The FIDO2 tab chooses whether sudo and polkit ask for the key's PIN along
+  with the touch, or for a touch alone. The switch runs `pkexec
+  omarchy-security-key-pam pin-on` (or `pin-off`), a new helper in the Arch
+  package with its own polkit action, which asks for an administrator. It
+  only changes the `pam_u2f.so` auth lines of `/etc/pam.d/sudo` and
+  `/etc/pam.d/polkit-1`, and in them only `pinverification=` (`1`, or
+  dropped) and `userpresence=1`. When only one of them asks for the PIN, the
+  switch shows off and says so; turning it on sets both. It refuses to ask
+  for the PIN while the key plugged in has none. Without the package, the tab
+  says to install it.
+
 ## 0.7.4 (2026-11-10)
 
 - Restrict resident SSH key names strictly to safe characters. Resident key

@@ -16,7 +16,8 @@ only when the key plugged in can do it:
   keys registered for you, each with its own remove button. Keys go to your
   line of Omarchy's `/etc/fido2/fido2` through the package's helper, or to your
   own `~/.config/Yubico/u2f_keys` when PAM reads that file, and nowhere else
-  (see below).
+  (see below). A switch chooses whether sudo and polkit ask for the key's PIN
+  along with the touch, or for a touch alone ([below](#the-pin)).
 - **OpenPGP key on the card** (keys with an OpenPGP applet): shows the
   holder, fingerprint and whether gpg knows the key; imports the public key
   from the URL stored on the card (or the keyservers), links it to the card
@@ -79,7 +80,8 @@ handing the PIN over a socket in a private folder of `$XDG_RUNTIME_DIR`.
 ### sudo and polkit
 
 The overlay only registers a key where sudo and polkit will read it, going by
-their `pam_u2f.so` lines. It doesn't change PAM itself.
+their `pam_u2f.so` lines. Registering keys doesn't change PAM; only the PIN
+switch does ([below](#the-pin)).
 
 | sudo and polkit read keys from | Registering |
 |--------------------------------|-------------|
@@ -98,13 +100,30 @@ the polkit agent asks you to authenticate. The helper only ever touches
 `/etc/fido2/fido2`, and in it your own line, the one of the user pkexec names.
 A plugin from the marketplace can't install that helper.
 
+#### The PIN
+
 What sudo and polkit ask for when you use a key is up to their `pam_u2f.so`
-line. To demand its PIN and a touch, add these options; the overlay then turns
-away a key that has no PIN, which could never sign in:
+line. The FIDO2 tab's switch *Ask for the PIN along with the touch* sets it,
+for both at once, through `pkexec omarchy-security-key-pam pin-on` (or
+`pin-off`), the package's other helper. Changing how everyone signs in, its
+polkit action (`org.omarchy.security-key.pam`) asks for an administrator.
+
+On, the lines read:
 
 ```
 auth sufficient pam_u2f.so cue authfile=/etc/fido2/fido2 pinverification=1 userpresence=1
 ```
+
+Off, `pinverification=` goes (the key's own default: a touch, unless it
+always demands its PIN) and `userpresence=1` stays. The helper only changes
+those two options, on the `pam_u2f.so` auth lines of `/etc/pam.d/sudo` and
+`/etc/pam.d/polkit-1`; every other line and option stays as it was, and a
+line it can't change safely (a bracketed control) is refused. When only one
+of sudo and polkit asks for the PIN, the switch shows off and says so; turning
+it on sets both. It won't turn the PIN on while the key plugged in has none,
+and with the PIN on the overlay turns away a key that has no PIN, which could
+never sign in. Without the package, the tab says to install it, and the
+options can be set by hand as above.
 
 Registering the key plugged in a second time is refused: the overlay asks it,
 without a touch, whether it made one of your keys there.
@@ -205,7 +224,8 @@ Update with `omarchy plugin update lbssousa.security-key`.
 `/usr/share/security-key-omarchy/plugin`, an `omarchy-security-key` command
 that opens it (or the terminal FIDO2 setup, when the plugin is off), and
 `omarchy-security-key-authfile` with its polkit action, which save your keys in
-`/etc/fido2/fido2`:
+`/etc/fido2/fido2`, and `omarchy-security-key-pam` with its own, which sets
+whether sudo and polkit ask for the PIN:
 
 ```sh
 cd packaging && makepkg -si

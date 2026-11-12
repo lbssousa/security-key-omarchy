@@ -112,7 +112,8 @@ class SessionTest(unittest.TestCase):
         (self.pam / "sudo").write_text("auth sufficient pam_u2f.so cue\nauth include system-auth\n")
         (self.pam / "polkit-1").write_text("auth include system-auth\n")
         self.paths = helper.Paths(home=str(self.home), config=str(self.home / ".config"),
-                                  pam_dirs=[str(self.pam)], runtime=str(root), shared_helper="")
+                                  pam_dirs=[str(self.pam)], runtime=str(root), shared_helper="",
+                                  pam_helper="")
         self.runner = FakeRunner()
         self.events = []
         self.session = helper.Session(self.runner, self.events.append, self.paths, "ada", "/askpass")
@@ -325,6 +326,86 @@ class SessionTest(unittest.TestCase):
         self.run_op(self.session.fido_register(""))
         self.assertEqual(self.last("done")["op"], "fido.register")
         self.assertFalse(self.last("state")["pinRequired"])
+
+    # -- PIN for sudo and polkit ------------------------------------------
+
+    PAM_HELPER = "/usr/bin/omarchy-security-key-pam"
+
+    def test_pin_mode(self):
+        self.assertEqual(self.session.pin_mode(), "off")
+        (self.pam / "polkit-1").write_text("auth sufficient pam_u2f.so cue pinverification=1\n")
+        self.assertEqual(self.session.pin_mode(), "mixed")
+        (self.pam / "sudo").write_text("auth sufficient pam_u2f.so cue pinverification=1\n")
+        self.assertEqual(self.session.pin_mode(), "on")
+        (self.pam / "sudo").write_text("auth include system-auth\n")
+        (self.pam / "polkit-1").write_text("auth include system-auth\n")
+        self.assertEqual(self.session.pin_mode(), "")
+
+    def test_state_reports_the_pin_mode_and_helper(self):
+        self.run_op(self.session.refresh())
+        self.assertEqual((self.last("state")["pinMode"], self.last("state")["pinHelper"]), ("off", False))
+        self.paths.pam_helper = self.PAM_HELPER
+        self.run_op(self.session.refresh())
+        self.assertTrue(self.last("state")["pinHelper"])
+
+    def test_pin_goes_through_pkexec(self):
+        self.paths.pam_helper = self.PAM_HELPER
+        self.registered()
+
+        async def apply(args, stdin, env, cwd):
+            if args[0] == "pkexec":
+                (self.pam / "sudo").write_text("auth sufficient pam_u2f.so cue pinverification=1 userpresence=1\n")
+            return None
+        self.runner.hook = apply
+        self.run_op(self.session.fido_pin(True))
+        self.assertEqual(self.runner.ran("pkexec")[0][0], ["pkexec", self.PAM_HELPER, "pin-on"])
+        self.assertEqual(self.last("done"), {"type": "done", "op": "fido.pin", "require": True})
+        self.assertEqual(self.last("state")["pinMode"], "on")
+        self.run_op(self.session.fido_pin(False))
+        self.assertEqual(self.runner.ran("pkexec")[1][0], ["pkexec", self.PAM_HELPER, "pin-off"])
+
+    def test_pin_refused_for_a_key_without_a_pin(self):
+        self.paths.pam_helper = self.PAM_HELPER
+        self.runner.answers[("fido2-token", "-I")] = helper.Result(0, "options: up, noclientPin\n")
+        self.registered()
+        self.run_op(self.session.fido_pin(True))
+        self.assertEqual(self.last("error")["code"], "pin-unset")
+        self.assertEqual(self.runner.ran("pkexec"), [])
+        self.run_op(self.session.fido_pin(False))
+        self.assertEqual(self.last("done")["op"], "fido.pin")
+
+    def test_pin_refused_without_the_helper_or_pam_u2f(self):
+        self.registered()
+        self.run_op(self.session.fido_pin(True))
+        self.assertEqual(self.last("error")["code"], "generic")
+        self.paths.pam_helper = self.PAM_HELPER
+        (self.pam / "sudo").write_text("auth include system-auth\n")
+        self.run_op(self.session.fido_pin(True))
+        self.assertEqual(self.last("error")["code"], "generic")
+        self.assertEqual(self.runner.ran("pkexec"), [])
+
+    def test_pin_dismissed_or_failed(self):
+        self.paths.pam_helper = self.PAM_HELPER
+        self.registered()
+        self.runner.answers[("pkexec", self.PAM_HELPER)] = helper.Result(126, "", "dismissed")
+        self.run_op(self.session.fido_pin(True))
+        self.assertEqual(self.last("error")["code"], "not-authorized")
+        self.runner.answers[("pkexec", self.PAM_HELPER)] = helper.Result(1, "", "can't change safely")
+        self.run_op(self.session.fido_pin(True))
+        self.assertEqual(self.last("error")["code"], "pam-failed")
+
+    def test_pin_command_parsing(self):
+        self.paths.pam_helper = self.PAM_HELPER
+        self.registered()
+
+        async def drive():
+            self.session.handle_line('{"cmd":"fido.pin","require":"yes"}')
+            self.assertIsNone(self.session.op)
+            self.session.handle_line('{"cmd":"fido.pin","require":false}')
+            self.assertEqual(self.session.op, "fido.pin")
+            await self.session.task
+        self.run_op(drive())
+        self.assertEqual(self.runner.ran("pkexec")[0][0], ["pkexec", self.PAM_HELPER, "pin-off"])
 
     def test_register_failure_reports_the_code(self):
         self.registered()

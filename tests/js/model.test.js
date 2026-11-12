@@ -128,3 +128,17 @@ test("SSH keys by name, and the new error codes", () => {
   assert.equal(Model.errorKey("ssh-not-on-key"), "securityKey.ssh.notOnKey")
   assert.equal(Model.errorKey("ssh-config-foreign"), "securityKey.ssh.hostLeftAlone")
 })
+
+test("the PIN toggle follows sudo's and polkit's pam_u2f lines", () => {
+  assert.equal(Model.pinModeKey("on"), "securityKey.fido.pinOn")
+  assert.equal(Model.pinModeKey("off"), "securityKey.fido.pinOff")
+  assert.equal(Model.pinModeKey("mixed"), "securityKey.fido.pinMixed")
+  assert.equal(Model.pinModeKey(""), "")
+  assert.equal(Model.pinModeKey(undefined), "")
+  assert.equal(Model.canSetPin("off", true), true)
+  assert.equal(Model.canSetPin("mixed", true), true)
+  assert.equal(Model.canSetPin("on", false), false)
+  assert.equal(Model.canSetPin("", true), false)
+  assert.equal(Model.errorKey("pin-unset"), "securityKey.fido.pinUnset")
+  assert.equal(Model.errorKey("pam-failed"), "securityKey.fido.pinFailed")
+})
