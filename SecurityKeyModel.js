@@ -41,6 +41,24 @@ function targetNoticeKey(target) {
   return (target && TARGET_NOTICES[target.kind]) || ""
 }
 
+var PIN_MODE_KEYS = {
+  "on": "securityKey.fido.pinOn",
+  "off": "securityKey.fido.pinOff",
+  "mixed": "securityKey.fido.pinMixed"
+}
+
+// What the PIN toggle says about sudo's and polkit's pam_u2f lines (the
+// helper's "pinMode"), or "" when neither uses pam_u2f.
+function pinModeKey(mode) {
+  return PIN_MODE_KEYS[mode] || ""
+}
+
+// The PIN toggle is offered when sudo or polkit use pam_u2f and the
+// package's PAM helper is installed.
+function canSetPin(mode, helper) {
+  return pinModeKey(mode) !== "" && helper === true
+}
+
 // Whether a key is registered where sudo and polkit read it.
 function hasActive(credentials) {
   for (var i = 0; credentials && i < credentials.length; i++) if (!credentials[i].unused) return true
@@ -75,6 +93,8 @@ var ERROR_KEYS = {
   "no-device": "securityKey.error.noDevice",
   "no-card": "securityKey.error.noDevice",
   "no-pin": "securityKey.fido.needsPin",
+  "pin-unset": "securityKey.fido.pinUnset",
+  "pam-failed": "securityKey.fido.pinFailed",
   "already-registered": "securityKey.fido.alreadyRegistered",
   "write-failed": "securityKey.error.writeFailed",
   // pkexec dismissed, refused or left unanswered (the shared authfile).
@@ -205,6 +225,8 @@ if (typeof module !== "undefined") {
     canRegister: canRegister,
     needsPin: needsPin,
     targetNoticeKey: targetNoticeKey,
+    pinModeKey: pinModeKey,
+    canSetPin: canSetPin,
     hasActive: hasActive,
     formatFingerprint: formatFingerprint,
     errorKey: errorKey,

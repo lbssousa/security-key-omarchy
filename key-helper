@@ -14,10 +14,18 @@ for the user to authenticate). Anywhere else, registering is refused, and
 "target" in the state says why. Keys left in the user's own list while nothing
 reads it are reported as "unused", so they can be removed.
 
+Whether sudo and polkit ask for the key's PIN along with the touch is up to
+their pam_u2f.so lines; "fido.pin" changes them through the package's other
+helper (`pkexec omarchy-security-key-pam pin-on|pin-off`: polkit asks for an
+administrator).
+
 Commands:
   {"cmd":"refresh"}
   {"cmd":"fido.register","pin":"…"}
   {"cmd":"fido.remove","index":0}
+  {"cmd":"fido.pin","require":true|false}
+                                       (sudo and polkit ask for the PIN and a
+                                          touch, or for a touch alone)
   {"cmd":"gpg.import"}                 (also updates a key gpg has: new expiry, subkeys)
   {"cmd":"gpg.trust"}
   {"cmd":"gpg.remove"}                 (the card's key out of the keyring: public
@@ -45,6 +53,8 @@ Events:
    "credentials":[{"handle","label","unused"}],
    "target":{"kind":"own"|"shared"|"no-pam"|"no-helper"|"other-file"|"mixed","path"},
    "pinRequired",
+   "pinMode":""|"on"|"off"|"mixed",  ("" = neither uses pam_u2f; "mixed" = only one asks for the PIN)
+   "pinHelper",                      (whether "fido.pin" can change it here)
    "sharedCount",
    "card":null|{"vendor","serial","holder","url","fingerprints"},
    "keyState":"none"|"missing"|"public"|"ready","trusted",
@@ -53,7 +63,8 @@ Events:
    "sshDefaults":{"user","comment"}}
   {"type":"busy","op","stage"}          (stage "touch" while waiting for a touch,
                                           "auth" while polkit asks for the password)
-  {"type":"done","op",…}               (fido.register, fido.remove, gpg.import,
+  {"type":"done","op",…}               (fido.register, fido.remove, fido.pin with
+                                          "require", gpg.import,
                                           gpg.trust, gpg.remove, gpg.import with
                                           "updated", ssh.import with
                                           "imported"/"skipped", ssh.remove and
@@ -93,6 +104,9 @@ ASKPASS_ENV = "SECURITY_KEY_ASKPASS_SOCKET"
 # pkexec's exit codes for a dismissed or refused authentication.
 SHARED_HELPER = "omarchy-security-key-authfile"
 SHARED_AUTHFILE = "/etc/fido2/fido2"
+# The package's helper that sets pinverification= on sudo's and polkit's
+# pam_u2f.so lines.
+PAM_HELPER = "omarchy-security-key-pam"
 PKEXEC_REFUSED = (126, 127)
 # Making a resident SSH key waits for a touch, twice when it replaces one.
 CREATE_TIMEOUT_S = 120
@@ -586,7 +600,7 @@ class Runner:
 
 class Paths:
     def __init__(self, home=None, config=None, pam_dirs=None, runtime=None, shared_helper=None,
-                 shared_authfile=SHARED_AUTHFILE):
+                 shared_authfile=SHARED_AUTHFILE, pam_helper=None):
         self.home = home or os.path.expanduser("~")
         # pam_u2f's default authfile: $XDG_CONFIG_HOME/Yubico/u2f_keys, else ~/.config.
         self.config = config or os.environ.get("XDG_CONFIG_HOME") or os.path.join(self.home, ".config")
@@ -595,6 +609,7 @@ class Paths:
         # An absolute path: pkexec matches it against the polkit action's.
         self.shared_helper = shared_helper if shared_helper is not None else (shutil.which(SHARED_HELPER) or "")
         self.shared_authfile = shared_authfile
+        self.pam_helper = pam_helper if pam_helper is not None else (shutil.which(PAM_HELPER) or "")
 
     @property
     def authfile(self):
@@ -651,6 +666,8 @@ class Session:
             self.start(name, self.fido_register(pin))
         elif name == "fido.remove" and isinstance(command.get("index"), int):
             self.start(name, self.fido_remove(command["index"]))
+        elif name == "fido.pin" and isinstance(command.get("require"), bool):
+            self.start(name, self.fido_pin(command["require"]))
         elif name == "gpg.import":
             self.start(name, self.gpg_import())
         elif name == "gpg.trust":
@@ -784,6 +801,14 @@ class Session:
     def pin_required(self, pam=None):
         """Whether sudo or polkit only take a key with its PIN, so one without a PIN would never work."""
         return any(s["u2f"] and s["pin"] for s in (pam or self.pam_state()).values())
+
+    def pin_mode(self, pam=None):
+        """Whether the services that use pam_u2f ask for the PIN: "on", "off",
+        "mixed" (only some do) or "" (none uses pam_u2f)."""
+        pins = {s["pin"] for s in (pam or self.pam_state()).values() if s["u2f"]}
+        if not pins:
+            return ""
+        return "mixed" if len(pins) > 1 else ("on" if pins.pop() else "off")
 
     def shared_credentials(self, target):
         return self.read_credentials(target["path"])[0] if target["kind"] == "shared" else []
@@ -978,6 +1003,8 @@ class Session:
             "credentials": credentials,
             "target": target,
             "pinRequired": self.pin_required(pam),
+            "pinMode": self.pin_mode(pam),
+            "pinHelper": bool(self.paths.pam_helper),
             "sharedCount": self.shared_count(target),
             "card": self.card,
             "keyState": key_state,
@@ -1071,6 +1098,32 @@ class Session:
             self.fail(op, "write-failed", self.paths.authfile)
             return
         self.emit({"type": "done", "op": op})
+        await self.emit_state()
+
+    async def fido_pin(self, require):
+        """Has sudo and polkit ask for the key's PIN along with the touch, or
+        for a touch alone, through `pkexec omarchy-security-key-pam`."""
+        op = "fido.pin"
+        if not self.pin_mode():
+            self.fail(op, "generic", "neither sudo nor polkit uses pam_u2f")
+            return
+        if not self.paths.pam_helper:
+            self.fail(op, "generic", PAM_HELPER)
+            return
+        # The key plugged in couldn't sign in any more: it has no PIN to give.
+        if require and self.devices and not self.devices[0].get("clientPin"):
+            self.fail(op, "pin-unset")
+            return
+        self.emit({"type": "busy", "op": op, "stage": "auth"})
+        action = "pin-on" if require else "pin-off"
+        result = await self.runner.run(["pkexec", self.paths.pam_helper, action], timeout=AUTH_TIMEOUT_S)
+        if result.code != 0:
+            log("%s %s failed:" % (PAM_HELPER, action), last_line(result.err))
+            refused = result.err == "timeout" or result.code in PKEXEC_REFUSED
+            # Dismissed: "Couldn't save /etc/pam.d"; otherwise the helper's reason.
+            self.fail(op, "not-authorized", "/etc/pam.d") if refused else self.fail(op, "pam-failed", last_line(result.err))
+            return
+        self.emit({"type": "done", "op": op, "require": require})
         await self.emit_state()
 
     async def write_shared(self, op, store, action, line):

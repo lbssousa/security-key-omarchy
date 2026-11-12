@@ -1,0 +1,122 @@
+#!/bin/bash
+
+# omarchy:summary=Have sudo and polkit ask for the FIDO2 key's PIN along with a touch, or for a touch alone
+# omarchy:requires-sudo=true
+# omarchy:hidden=true
+#
+# Usage (through pkexec, as the overlay runs it):
+#   pkexec omarchy-security-key-pam pin-on    # PIN and touch
+#   pkexec omarchy-security-key-pam pin-off   # touch alone
+#
+# Only ever changes the pam_u2f.so auth lines of /etc/pam.d/sudo and
+# /etc/pam.d/polkit-1, the ones omarchy-setup-security-fido2 writes, and in
+# them only the pinverification= and userpresence= options: pin-on sets
+# pinverification=1, pin-off drops it (the key's own default: no PIN unless
+# it always demands one), and both set userpresence=1. Every other line and
+# option stays as it was. The org.omarchy.security-key.pam polkit action asks
+# for an administrator, since this changes how everyone signs in.
+
+set -euo pipefail
+
+# Started by pkexec, take no paths or PATH from the caller. pkexec already
+# clears the environment; this is the backstop.
+if [[ -n ${PKEXEC_UID:-} ]]; then
+  unset SECURITY_KEY_PAM_ROOT
+  export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin
+fi
+
+# The tests run as fake root against a fake tree, without pkexec.
+root=${SECURITY_KEY_PAM_ROOT:-}
+pamdir=$root/etc/pam.d
+lockfile=$root/run/lock/omarchy-security-key-pam.lock
+services=(sudo polkit-1)
+
+die() {
+  echo "$*" >&2
+  exit 1
+}
+
+# Rewrites the pam_u2f.so auth lines of the PAM file on stdin. The text up to
+# the module (type, control, path) keeps its spacing; the options after it
+# keep their order, without pinverification= and userpresence=, which come
+# last. Exits 3 when the file has no such line, 4 on one it can't safely
+# change (a bracketed control, a continued line).
+rewrite() {
+  awk -v pin="$1" '
+    function u2f(line,   f) {
+      if (line ~ /^[[:space:]]*#/) return 0
+      split(line, f, /[[:space:]]+/)
+      if (f[1] == "") { f[1] = f[2]; f[2] = f[3]; f[3] = f[4] }
+      return f[1] ~ /^-?auth$/ && line ~ /(^|[[:space:]\/])pam_u2f\.so([[:space:]]|$)/
+    }
+    {
+      if (!u2f($0)) { print; next }
+      if ($0 ~ /\[/ || $0 ~ /\\[[:space:]]*$/) { bad = 1; print; next }
+      found = 1
+      match($0, /^.*pam_u2f\.so/)
+      head = substr($0, 1, RLENGTH)
+      n = split(substr($0, RLENGTH + 1), words, /[[:space:]]+/)
+      out = head
+      for (i = 1; i <= n; i++) {
+        if (words[i] == "" || words[i] ~ /^(pinverification|userpresence)=/) continue
+        out = out " " words[i]
+      }
+      if (pin == "on") out = out " pinverification=1"
+      print out " userpresence=1"
+    }
+    END { if (bad) exit 4; if (!found) exit 3 }
+  '
+}
+
+do_pin() {
+  local mode=$1 service file tmp status changed=0
+  for service in "${services[@]}"; do
+    file=$pamdir/$service
+    [[ -e $file || -L $file ]] || continue
+    [[ -f $file && ! -L $file ]] || die "$file is not a PAM configuration file."
+    tmp=$(mktemp "$file.new.XXXXXX")
+    status=0
+    rewrite "$mode" <"$file" >"$tmp" || status=$?
+    case $status in
+      0) ;;
+      3) rm -f -- "$tmp"; continue ;;
+      4) rm -f -- "$tmp"; die "$file has a pam_u2f.so line this helper can't change safely." ;;
+      *) rm -f -- "$tmp"; die "Could not rewrite $file." ;;
+    esac
+    if cmp -s -- "$tmp" "$file"; then
+      rm -f -- "$tmp"
+    else
+      # The new file takes the old one's owner and mode, then replaces it
+      # atomically: PAM never reads a half-written file.
+      chmod --reference="$file" -- "$tmp"
+      chown --reference="$file" -- "$tmp" 2>/dev/null || true
+      mv -Tf -- "$tmp" "$file"
+    fi
+    changed=$((changed + 1))
+  done
+  (( changed > 0 )) || die "Neither sudo nor polkit uses pam_u2f.so in $pamdir."
+  if [[ $mode == on ]]; then
+    echo "sudo and polkit now ask for the key's PIN and a touch."
+  else
+    echo "sudo and polkit now ask for a touch of the key alone."
+  fi
+}
+
+action=${1:-}
+case $action in
+  pin-on) mode=on ;;
+  pin-off) mode=off ;;
+  *)
+    echo "Usage: omarchy-security-key-pam {pin-on|pin-off}" >&2
+    exit 2
+    ;;
+esac
+
+(( EUID == 0 )) || die "Run through pkexec: pkexec omarchy-security-key-pam $action"
+[[ -d $pamdir && ! -L $pamdir ]] || die "$pamdir is not a PAM configuration directory."
+
+mkdir -p "$(dirname "$lockfile")"
+(
+  flock -w 30 9 || die "Timed out waiting for the PAM lock."
+  do_pin "$mode"
+) 9>"$lockfile"

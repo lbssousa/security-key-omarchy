@@ -10,7 +10,9 @@ post_install() {
 ==> When sudo and polkit read Omarchy's /etc/fido2/fido2, it registers keys
     there through omarchy-security-key-authfile, which asks you to
     authenticate. With no authfile= on their pam_u2f line, it uses your
-    ~/.config/Yubico/u2f_keys.
+    ~/.config/Yubico/u2f_keys. Its PIN switch changes the pam_u2f.so lines of
+    /etc/pam.d/sudo and polkit-1 through omarchy-security-key-pam, which
+    asks for an administrator.
 ==> Point the menu at it in ~/.config/omarchy/extensions/omarchy-menu.jsonc:
       "setup.security.fido2": {"action":"omarchy-shell shell summon lbssousa.security-key '{}'"},
 EOT

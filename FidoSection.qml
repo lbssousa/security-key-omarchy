@@ -5,7 +5,8 @@ import qs.Ui
 import "SecurityKeyModel.js" as Model
 
 // FIDO2/U2F for sudo and polkit: the keys registered for the user and, where
-// sudo and polkit will read them, the button that registers the key plugged in.
+// sudo and polkit will read them, the button that registers the key plugged in;
+// and whether they ask for the key's PIN along with the touch.
 // SecurityKey.qml runs the commands, asking for the PIN first (PinDialog).
 Section {
   id: fido
@@ -18,6 +19,9 @@ Section {
   property bool pinRequired: false
   readonly property bool needsPin: Model.needsPin(fido.pinRequired, fido.device)
   property int sharedCount: 0
+  // The helper's "pinMode" ("" | "on" | "off" | "mixed") and "pinHelper".
+  property string pinMode: ""
+  property bool pinHelper: false
   property bool busy: false
   property bool running: false
   // The remove button waiting for confirmation (Model.removeId), or "".
@@ -29,6 +33,7 @@ Section {
   signal registerRequested()
   signal removeRequested(int index)
   signal cancelRequested()
+  signal pinRequested(bool require)
 
   function t(key, fallback) { return fido.strings ? fido.strings.t(key, fallback) : (fallback || key) }
 
@@ -115,6 +120,36 @@ Section {
         onClicked: fido.removeRequested(index)
       }
     }
+  }
+
+  // On for PIN and touch; mixed (only one service asks) shows off, and
+  // turning it on sets both.
+  Toggle {
+    id: pinToggle
+    width: parent.width
+    visible: Model.canSetPin(fido.pinMode, fido.pinHelper)
+    enabled: !fido.busy
+    opacity: enabled ? 1 : 0.5
+    label: fido.t("securityKey.fido.pinToggle")
+    description: fido.t(Model.pinModeKey(fido.pinMode))
+    checked: fido.pinMode === "on"
+    foreground: fido.foreground
+    accent: fido.accent
+    fontFamily: fido.fontFamily
+    onClicked: fido.pinRequested(!checked)
+  }
+
+  Text {
+    width: parent.width
+    visible: Model.pinModeKey(fido.pinMode) !== "" && !fido.pinHelper
+    textFormat: Text.PlainText
+    text: fido.t("securityKey.fido.pinNoHelper")
+    wrapMode: Text.Wrap
+    horizontalAlignment: Text.AlignLeft
+    color: fido.foreground
+    opacity: 0.7
+    font.family: fido.fontFamily
+    font.pixelSize: Style.font.caption
   }
 
   Flow {

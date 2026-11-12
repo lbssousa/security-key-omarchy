@@ -16,9 +16,10 @@ test-js:
 test-py:
     python3 -I -m unittest discover -s tests/py
 
-# The authfile helper under fakeroot, against a fake /etc/fido2.
+# The privileged helpers under fakeroot, against a fake /etc.
 test-sh:
     tests/sh/authfile.test.sh
+    tests/sh/pam.test.sh
 
 # qmllint over the plugin (warnings only: the shell's qs.* modules aren't
 # importable outside it) and shellcheck when installed.
