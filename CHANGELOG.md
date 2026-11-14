@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.1 (2026-11-14)
+
+- Every program the helper runs ends bounded. Each of its stdout and stderr
+  is read up to 1 MiB; past that the program is stopped and the run fails,
+  instead of growing the helper's memory. On a timeout, a cancel or the
+  overlay closing, its process group gets SIGTERM, then SIGKILL after two
+  seconds, and is reaped; a child left holding a pipe is killed too. Before,
+  a timeout waited without bound for a program that ignored SIGTERM, and a
+  cancelled run was signalled but never reaped. Found in the Omarchy plugin
+  marketplace's review.
+
 ## 0.8.0 (2026-11-12)
 
 - The FIDO2 tab chooses whether sudo and polkit ask for the key's PIN along
