@@ -7,7 +7,9 @@ import os
 import pathlib
 import socket
 import stat
+import sys
 import tempfile
+import time
 import unittest
 
 HELPER = pathlib.Path(__file__).resolve().parents[2] / "key-helper"
@@ -1024,6 +1026,94 @@ class SessionTest(unittest.TestCase):
         self.session.handle_line("[1]")
         self.session.handle_line('{"cmd":"fido.remove","index":"x"}')
         self.assertIsNone(self.session.op)
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+class RunnerTest(unittest.TestCase):
+    """The real Runner, against small Python programs."""
+
+    def setUp(self):
+        self.grace = helper.KILL_GRACE_S
+        helper.KILL_GRACE_S = 0.3
+        self.tmp = tempfile.TemporaryDirectory()
+        self.pidfile = os.path.join(self.tmp.name, "pid")
+
+    def tearDown(self):
+        helper.KILL_GRACE_S = self.grace
+        self.tmp.cleanup()
+
+    def python(self, code):
+        return [sys.executable, "-I", "-c", code]
+
+    def run_(self, args, **kwargs):
+        runner = helper.Runner()
+        return asyncio.run(runner.run(args, **kwargs)), runner
+
+    def test_output_stdin_and_exit_code(self):
+        result, runner = self.run_(self.python(
+            "import sys; d = sys.stdin.read(); print(d.upper()); print('e', file=sys.stderr); sys.exit(3)"),
+            stdin="pin\n")
+        self.assertEqual((result.code, result.out, result.err), (3, "PIN\n\n", "e\n"))
+        self.assertIsNone(runner.proc)
+
+    def test_missing_program(self):
+        result, _ = self.run_(["/nonexistent/program"])
+        self.assertEqual(result.code, 127)
+
+    def test_output_past_the_limit_stops_the_program(self):
+        result, _ = self.run_(self.python(
+            "import os, sys, time\nopen(sys.argv[1], 'w').write(str(os.getpid()))\n"
+            "sys.stdout.buffer.write(b'x' * (%d + 1)); sys.stdout.flush(); time.sleep(60)"
+            % helper.OUTPUT_LIMIT) + [self.pidfile], timeout=30)
+        self.assertEqual((result.code, result.err), (-1, "output-too-large"))
+        self.assertFalse(alive(int(pathlib.Path(self.pidfile).read_text())))
+
+    def test_timeout_kills_a_program_that_ignores_sigterm(self):
+        result, _ = self.run_(self.python(
+            "import os, signal, sys, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "open(sys.argv[1], 'w').write(str(os.getpid()))\ntime.sleep(60)") + [self.pidfile], timeout=0.5)
+        self.assertEqual((result.code, result.err), (-1, "timeout"))
+        self.assertFalse(alive(int(pathlib.Path(self.pidfile).read_text())))
+
+    def test_timeout_kills_a_child_holding_the_pipe(self):
+        # The program exits at once; its child keeps stdout open.
+        result, _ = self.run_(self.python(
+            "import subprocess, sys\n"
+            "p = subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(60)'])\n"
+            "open(sys.argv[1], 'w').write(str(p.pid))") + [self.pidfile], timeout=0.5)
+        self.assertEqual(result.err, "timeout")
+        pid = int(pathlib.Path(self.pidfile).read_text())
+        for _ in range(50):
+            if not alive(pid):
+                break
+            time.sleep(0.02)
+        self.assertFalse(alive(pid))
+
+    def test_cancel_kills_and_reaps_before_the_operation_ends(self):
+        async def scenario():
+            runner = helper.Runner()
+            task = asyncio.ensure_future(runner.run(self.python(
+                "import os, signal, sys, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "open(sys.argv[1], 'w').write(str(os.getpid()))\ntime.sleep(60)") + [self.pidfile],
+                timeout=60))
+            while not os.path.exists(self.pidfile) or not pathlib.Path(self.pidfile).read_text():
+                await asyncio.sleep(0.02)
+            proc = runner.proc
+            runner.cancel()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            return proc
+        proc = asyncio.run(scenario())
+        self.assertIsNotNone(proc.returncode)
+        self.assertFalse(alive(int(pathlib.Path(self.pidfile).read_text())))
 
 
 if __name__ == "__main__":

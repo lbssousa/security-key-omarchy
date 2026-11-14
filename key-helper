@@ -99,6 +99,11 @@ NETWORK_TIMEOUT_S = 45
 PROBE_TIMEOUT_S = 10
 AUTH_TIMEOUT_S = 120
 POLL_S = 2
+# What a run keeps of each of a program's stdout and stderr; past it the run
+# fails. The programs here print a few kilobytes at most.
+OUTPUT_LIMIT = 1024 * 1024
+# How long a program has to exit after SIGTERM, then after SIGKILL.
+KILL_GRACE_S = 2
 ASKPASS_ENV = "SECURITY_KEY_ASKPASS_SOCKET"
 # This package's helper for a root-owned authfile, the one file it writes, and
 # pkexec's exit codes for a dismissed or refused authentication.
@@ -561,8 +566,42 @@ class Result:
         self.err = err
 
 
+class OutputTooLarge(Exception):
+    pass
+
+
+async def read_capped(stream, limit):
+    """Reads <stream> to its end, or raises OutputTooLarge past <limit> bytes."""
+    data = bytearray()
+    while True:
+        chunk = await stream.read(65536)
+        if not chunk:
+            return bytes(data)
+        if len(data) + len(chunk) > limit:
+            raise OutputTooLarge()
+        data += chunk
+
+
+def signal_group(proc, signum):
+    """Signals the program's process group (its own session); False if it can't."""
+    try:
+        os.killpg(proc.pid, signum)
+        return True
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        # A program that became root (the helper under pkexec) can't be
+        # signalled; it still ends with its own timeout or its caller's pipe.
+        return False
+
+
 class Runner:
-    """Runs one program at a time for an operation; cancel() kills it."""
+    """Runs one program at a time for an operation; cancel() kills it.
+
+    Every run ends with the program reaped, or given up on after a bounded
+    wait: whether it exits, times out, writes more than OUTPUT_LIMIT, or the
+    operation is cancelled. Each of stdout and stderr keeps at most
+    OUTPUT_LIMIT bytes; past that the program is stopped and the run fails."""
 
     def __init__(self):
         self.proc = None
@@ -575,24 +614,64 @@ class Runner:
         except FileNotFoundError:
             return Result(127, "", "%s: not found" % args[0])
         self.proc = proc
+        readers = [asyncio.ensure_future(read_capped(proc.stdout, OUTPUT_LIMIT)),
+                   asyncio.ensure_future(read_capped(proc.stderr, OUTPUT_LIMIT))]
         try:
-            out, err = await asyncio.wait_for(proc.communicate(stdin.encode() if stdin else b""), timeout)
-        except asyncio.TimeoutError:
-            self.kill(proc)
-            await proc.wait()
-            return Result(-1, "", "timeout")
+            try:
+                out, err = await asyncio.wait_for(self.finish(proc, stdin, readers), timeout)
+            except asyncio.TimeoutError:
+                return Result(-1, "", "timeout")
+            except OutputTooLarge:
+                return Result(-1, "", "output-too-large")
         finally:
+            # Shielded: a second cancel can't cut the kill and reap short.
+            await asyncio.shield(self.stop(proc, readers))
             if self.proc is proc:
                 self.proc = None
         return Result(proc.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace"))
 
+    async def finish(self, proc, stdin, readers):
+        if stdin:
+            proc.stdin.write(stdin.encode())
+        try:
+            await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        proc.stdin.close()
+        out, err = await asyncio.gather(*readers)
+        await proc.wait()
+        return out, err
+
+    async def stop(self, proc, readers):
+        """Ends the run: no reader left, the program and its group gone."""
+        # A reader that didn't reach its end (still reading, cancelled with
+        # the timeout, or past the limit) means a pipe may still be held.
+        pending = any(not r.done() or r.cancelled() or r.exception() is not None for r in readers)
+        for reader in readers:
+            reader.cancel()
+        if pending or proc.returncode is None:
+            # Something of the group still runs, or holds a pipe open.
+            for signum in (signal.SIGTERM, signal.SIGKILL):
+                if not signal_group(proc, signum):
+                    break
+                if await self.reaped(proc, KILL_GRACE_S) and (signum == signal.SIGKILL or not pending):
+                    break
+        if proc.returncode is None and not await self.reaped(proc, KILL_GRACE_S):
+            log("pid %d did not exit; leaving it" % proc.pid)
+        await asyncio.gather(*readers, return_exceptions=True)
+
+    @staticmethod
+    async def reaped(proc, timeout):
+        try:
+            await asyncio.wait_for(asyncio.shield(proc.wait()), timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
     def kill(self, proc=None):
         proc = proc or self.proc
         if proc is not None and proc.returncode is None:
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+            signal_group(proc, signal.SIGTERM)
 
     def cancel(self):
         self.kill()
@@ -1582,8 +1661,12 @@ async def serve():
         except asyncio.TimeoutError:
             if session.op is None:
                 session.start("refresh", session.poll())
+    task = session.task
     session.shutdown()
-    await asyncio.sleep(0.2)
+    # Let the cancelled operation kill and reap its program; its stop() is
+    # bounded by three grace periods.
+    if task is not None:
+        await asyncio.wait([task], timeout=3 * KILL_GRACE_S + 1)
 
 
 def main():
